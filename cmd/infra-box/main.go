@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/define42/Infrastructure-in-a-Box/internal/acmeserver"
@@ -42,10 +43,7 @@ func run(logger *slog.Logger) error {
 	if err := checkInterface(cfg.Interface, cfg.ServerIP); err != nil {
 		return err
 	}
-	leases, err := lease.New(lease.Config{
-		PoolStart: cfg.PoolStart, PoolEnd: cfg.PoolEnd, Domain: cfg.Domain,
-		LeaseDuration: cfg.LeaseDuration, File: cfg.LeaseFile,
-	})
+	leases, err := newLeaseManager(cfg)
 	if err != nil {
 		return fmt.Errorf("initialize leases: %w", err)
 	}
@@ -58,7 +56,7 @@ func run(logger *slog.Logger) error {
 	}
 	dns, err := dnsserver.New(dnsserver.Config{
 		Address: cfg.DNSAddress, Domain: cfg.Domain, ServerIP: cfg.ServerIP,
-		Subnet: cfg.Subnet, Upstream: cfg.Upstream, TTL: cfg.DNSTTL,
+		Subnet: cfg.Subnet, Upstream: cfg.Upstream, TTL: cfg.DNSTTL, ARecords: cfg.ARecords,
 	}, leases, logger)
 	if err != nil {
 		return err
@@ -70,6 +68,20 @@ func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return serve(ctx, dhcp.Run, dns.Run, https.Run)
+}
+
+func newLeaseManager(cfg config.Config) (*lease.Manager, error) {
+	names := make([]string, 0, len(cfg.ARecords))
+	for name := range cfg.ARecords {
+		// Only exact static hosts are reserved; DHCP names override wildcards.
+		if name != cfg.Domain+"." && !strings.HasPrefix(name, "*.") {
+			names = append(names, name)
+		}
+	}
+	return lease.New(lease.Config{
+		PoolStart: cfg.PoolStart, PoolEnd: cfg.PoolEnd, Domain: cfg.Domain,
+		LeaseDuration: cfg.LeaseDuration, File: cfg.LeaseFile, ReservedNames: names,
+	})
 }
 
 func newGateway(cfg config.Config, leases *lease.Manager, logger *slog.Logger) (*gateway.Server, error) {

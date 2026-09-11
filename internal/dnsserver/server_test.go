@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/define42/Infrastructure-in-a-Box/internal/lease"
@@ -35,6 +36,15 @@ func (r testRegistry) LookupIP(ip netip.Addr) (lease.Lease, bool) {
 		}
 	}
 	return lease.Lease{}, false
+}
+
+func (r testRegistry) HasName(name string) bool {
+	for _, entry := range r.entries {
+		if time.Now().Before(entry.ExpiresAt) && (entry.Hostname == name || strings.HasSuffix(entry.Hostname, "."+name)) {
+			return true
+		}
+	}
+	return false
 }
 
 func testConfig() Config {
@@ -88,6 +98,67 @@ func TestNew(t *testing.T) {
 	}
 	if _, err := New(testConfig(), nil, nil); err == nil {
 		t.Fatal("nil registry accepted")
+	}
+}
+
+func TestNewARecords(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name    string
+		records map[string]netip.Addr
+	}{
+		{"empty hostname", map[string]netip.Addr{"": netip.MustParseAddr("192.168.1.10")}},
+		{"partial wildcard", map[string]netip.Addr{"nas*.home.arpa": netip.MustParseAddr("192.168.1.10")}},
+		{"external hostname", map[string]netip.Addr{"nas.example.org": netip.MustParseAddr("192.168.1.10")}},
+		{"domain suffix confusion", map[string]netip.Addr{"nothome.arpa": netip.MustParseAddr("192.168.1.10")}},
+		{"underscore", map[string]netip.Addr{"my_nas": netip.MustParseAddr("192.168.1.10")}},
+		{"leading whitespace", map[string]netip.Addr{" nas": netip.MustParseAddr("192.168.1.10")}},
+		{"Unicode case fold", map[string]netip.Addr{"\u212aelvin": netip.MustParseAddr("192.168.1.10")}},
+		{"escaped name", map[string]netip.Addr{`n\097s`: netip.MustParseAddr("192.168.1.10")}},
+		{"invalid label", map[string]netip.Addr{"-nas": netip.MustParseAddr("192.168.1.10")}},
+		{"long label", map[string]netip.Addr{strings.Repeat("a", 64): netip.MustParseAddr("192.168.1.10")}},
+		{"reserved NS", map[string]netip.Addr{"NS.HOME.ARPA.": netip.MustParseAddr("192.168.1.10")}},
+		{"reserved gateway", map[string]netip.Addr{"gateway": netip.MustParseAddr("192.168.1.10")}},
+		{"duplicate hostname", map[string]netip.Addr{
+			"nas": netip.MustParseAddr("192.168.1.10"), "NAS.HOME.ARPA.": netip.MustParseAddr("192.168.1.11"),
+		}},
+		{"duplicate apex", map[string]netip.Addr{
+			"@": netip.MustParseAddr("192.168.1.10"), "HOME.ARPA.": netip.MustParseAddr("192.168.1.11"),
+		}},
+		{"invalid address", map[string]netip.Addr{"nas": {}}},
+		{"IPv6", map[string]netip.Addr{"nas": netip.MustParseAddr("2001:db8::1")}},
+		{"mapped IPv4", map[string]netip.Addr{"nas": netip.MustParseAddr("::ffff:192.168.1.10")}},
+		{"unspecified", map[string]netip.Addr{"nas": netip.MustParseAddr("0.0.0.0")}},
+		{"loopback", map[string]netip.Addr{"nas": netip.MustParseAddr("127.0.0.1")}},
+		{"link local", map[string]netip.Addr{"nas": netip.MustParseAddr("169.254.0.1")}},
+		{"multicast", map[string]netip.Addr{"nas": netip.MustParseAddr("224.0.0.1")}},
+		{"broadcast", map[string]netip.Addr{"nas": netip.MustParseAddr("255.255.255.255")}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			config := testConfig()
+			config.ARecords = test.records
+			if _, err := New(config, testRegistry{}, nil); err == nil {
+				t.Fatal("invalid static A record accepted")
+			}
+		})
+	}
+}
+
+func TestNewCopiesARecords(t *testing.T) {
+	t.Parallel()
+	config := testConfig()
+	config.ARecords = map[string]netip.Addr{"nas.home.arpa.": netip.MustParseAddr("192.168.1.10")}
+	server := newTestServer(t, config)
+	config.ARecords["nas.home.arpa."] = netip.MustParseAddr("192.168.1.20")
+	config.ARecords["added.home.arpa."] = netip.MustParseAddr("192.168.1.30")
+	response := queryServer(t, server, new(dns.Msg).SetQuestion("nas.home.arpa.", dns.TypeA))
+	if len(response.Answer) != 1 || response.Answer[0].(*dns.A).A.String() != "192.168.1.10" {
+		t.Fatalf("caller map mutation changed static answer: %s", response)
+	}
+	response = queryServer(t, server, new(dns.Msg).SetQuestion("added.home.arpa.", dns.TypeA))
+	if response.Rcode != dns.RcodeNameError {
+		t.Fatalf("caller map mutation added a static answer: %s", response)
 	}
 }
 
@@ -179,6 +250,264 @@ func TestServeDNSLeaseRecords(t *testing.T) {
 				t.Fatalf("TTL exceeds lease lifetime: %v", response.Answer)
 			}
 		})
+	}
+}
+
+func TestServeDNSARecords(t *testing.T) {
+	t.Parallel()
+	config := testConfig()
+	config.ARecords = map[string]netip.Addr{
+		"NAS":                netip.MustParseAddr("192.168.1.10"),
+		"printer.home.arpa.": netip.MustParseAddr("192.168.1.20"),
+		"app.lab.HOME.ARPA":  netip.MustParseAddr("10.0.0.30"),
+		"expired":            netip.MustParseAddr("192.168.1.40"),
+		"@":                  netip.MustParseAddr("192.168.1.50"),
+		"alias":              netip.MustParseAddr("192.168.1.10"),
+	}
+	server := newTestServer(t, config,
+		lease.Lease{Hostname: "nas.home.arpa.", IP: netip.MustParseAddr("192.168.1.100"), ExpiresAt: time.Now().Add(10 * time.Second)},
+		lease.Lease{Hostname: "expired.home.arpa.", IP: netip.MustParseAddr("192.168.1.101"), ExpiresAt: time.Now().Add(-time.Second)},
+		lease.Lease{Hostname: "laptop.home.arpa.", IP: netip.MustParseAddr("192.168.1.102"), ExpiresAt: time.Now().Add(time.Hour)},
+	)
+	for _, test := range []struct {
+		name  string
+		query string
+		kind  uint16
+		code  int
+		value string
+	}{
+		{"static overrides active lease", "NaS.HoMe.ArPa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.10"},
+		{"qualified name", "printer.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.20"},
+		{"nested hostname outside subnet", "app.lab.home.arpa.", dns.TypeA, dns.RcodeSuccess, "10.0.0.30"},
+		{"static outlives expired lease", "expired.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.40"},
+		{"apex address", "home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.50"},
+		{"shared address", "alias.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.10"},
+		{"ANY answer", "nas.home.arpa.", dns.TypeANY, dns.RcodeSuccess, "192.168.1.10"},
+		{"static AAAA NODATA", "nas.home.arpa.", dns.TypeAAAA, dns.RcodeSuccess, ""},
+		{"static TXT NODATA", "nas.home.arpa.", dns.TypeTXT, dns.RcodeSuccess, ""},
+		{"apex AAAA NODATA", "home.arpa.", dns.TypeAAAA, dns.RcodeSuccess, ""},
+		{"static has no PTR", "10.1.168.192.in-addr.arpa.", dns.TypePTR, dns.RcodeNameError, ""},
+		{"dynamic address retained", "laptop.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.102"},
+		{"gateway retained", "gateway.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.1"},
+		{"nameserver retained", "ns.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			response := queryServer(t, server, new(dns.Msg).SetQuestion(test.query, test.kind))
+			if response.Rcode != test.code || !response.Authoritative {
+				t.Fatalf("unexpected static response: %s", response)
+			}
+			if test.value == "" {
+				if len(response.Answer) != 0 || len(response.Ns) != 1 || response.Ns[0].Header().Rrtype != dns.TypeSOA {
+					t.Fatalf("negative response lacks SOA: %s", response)
+				}
+				return
+			}
+			if len(response.Answer) != 1 {
+				t.Fatalf("expected one A answer: %s", response)
+			}
+			answer, ok := response.Answer[0].(*dns.A)
+			if !ok || answer.A.String() != test.value || answer.Hdr.Ttl != 60 {
+				t.Fatalf("expected A %s with configured TTL: %s", test.value, response)
+			}
+		})
+	}
+	for _, kind := range []uint16{dns.TypeSOA, dns.TypeNS} {
+		response := queryServer(t, server, new(dns.Msg).SetQuestion("home.arpa.", kind))
+		if response.Rcode != dns.RcodeSuccess || !response.Authoritative || len(response.Answer) != 1 || response.Answer[0].Header().Rrtype != kind {
+			t.Fatalf("static apex changed zone records: %s", response)
+		}
+	}
+}
+
+func TestServeDNSARecordApexSpelling(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"@", "home.arpa", "HOME.ARPA."} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			config := testConfig()
+			config.TTL = 0
+			config.ARecords = map[string]netip.Addr{name: netip.MustParseAddr("192.168.1.10")}
+			server := newTestServer(t, config)
+			response := queryServer(t, server, new(dns.Msg).SetQuestion("home.arpa.", dns.TypeA))
+			if response.Rcode != dns.RcodeSuccess || len(response.Answer) != 1 {
+				t.Fatalf("apex did not resolve: %s", response)
+			}
+			answer, ok := response.Answer[0].(*dns.A)
+			if !ok || answer.A.String() != "192.168.1.10" || answer.Hdr.Ttl != 0 {
+				t.Fatalf("unexpected apex address or TTL: %s", response)
+			}
+		})
+	}
+}
+
+func TestServeDNSWildcardARecords(t *testing.T) {
+	t.Parallel()
+	config := testConfig()
+	config.ARecords = map[string]netip.Addr{
+		"*":                     netip.MustParseAddr("192.168.1.10"),
+		"*.apps.home.arpa":      netip.MustParseAddr("192.168.1.20"),
+		"fixed":                 netip.MustParseAddr("192.168.1.30"),
+		"leaf.static.home.arpa": netip.MustParseAddr("192.168.1.40"),
+		"*.deep.apps.home.arpa": netip.MustParseAddr("192.168.1.50"),
+	}
+	server := newTestServer(t, config,
+		lease.Lease{Hostname: "laptop.home.arpa.", IP: netip.MustParseAddr("192.168.1.100"), ExpiresAt: time.Now().Add(time.Hour)},
+		lease.Lease{Hostname: "host.dhcp.home.arpa.", IP: netip.MustParseAddr("192.168.1.101"), ExpiresAt: time.Now().Add(time.Hour)},
+		lease.Lease{Hostname: "old.expired.home.arpa.", IP: netip.MustParseAddr("192.168.1.102"), ExpiresAt: time.Now().Add(-time.Second)},
+	)
+	for _, test := range []struct {
+		name  string
+		query string
+		kind  uint16
+		code  int
+		value string
+	}{
+		{"root wildcard", "missing.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.10"},
+		{"case insensitive", "MiSsInG.HoMe.ArPa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.10"},
+		{"multiple absent levels", "one.two.three.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.10"},
+		{"ANY synthesis", "missing.home.arpa.", dns.TypeANY, dns.RcodeSuccess, "192.168.1.10"},
+		{"AAAA synthesis NODATA", "missing.home.arpa.", dns.TypeAAAA, dns.RcodeSuccess, ""},
+		{"TXT synthesis NODATA", "missing.home.arpa.", dns.TypeTXT, dns.RcodeSuccess, ""},
+		{"exact static wins", "fixed.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.30"},
+		{"exact static without AAAA", "fixed.home.arpa.", dns.TypeAAAA, dns.RcodeSuccess, ""},
+		{"static subtree blocks broader wildcard", "child.fixed.home.arpa.", dns.TypeA, dns.RcodeNameError, ""},
+		{"static empty non-terminal exists", "static.home.arpa.", dns.TypeA, dns.RcodeSuccess, ""},
+		{"static empty non-terminal blocks broader wildcard", "other.static.home.arpa.", dns.TypeA, dns.RcodeNameError, ""},
+		{"exact DHCP wins", "laptop.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.100"},
+		{"exact DHCP without AAAA", "laptop.home.arpa.", dns.TypeAAAA, dns.RcodeSuccess, ""},
+		{"DHCP subtree blocks broader wildcard", "child.laptop.home.arpa.", dns.TypeA, dns.RcodeNameError, ""},
+		{"DHCP empty non-terminal exists", "dhcp.home.arpa.", dns.TypeA, dns.RcodeSuccess, ""},
+		{"DHCP empty non-terminal blocks broader wildcard", "other.dhcp.home.arpa.", dns.TypeA, dns.RcodeNameError, ""},
+		{"expired DHCP does not override wildcard", "old.expired.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.10"},
+		{"expired DHCP ancestor does not exist", "expired.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.10"},
+		{"expired DHCP subtree does not block wildcard", "other.expired.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.10"},
+		{"nameserver wins", "ns.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.1"},
+		{"nameserver subtree blocks wildcard", "child.ns.home.arpa.", dns.TypeA, dns.RcodeNameError, ""},
+		{"gateway wins", "gateway.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.1"},
+		{"gateway subtree blocks wildcard", "child.gateway.home.arpa.", dns.TypeA, dns.RcodeNameError, ""},
+		{"zone apex not synthesized", "home.arpa.", dns.TypeA, dns.RcodeSuccess, ""},
+		{"nested wildcard", "web.apps.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.20"},
+		{"nested multiple absent levels", "one.two.apps.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.20"},
+		{"wildcard parent exists", "apps.home.arpa.", dns.TypeA, dns.RcodeSuccess, ""},
+		{"closest wildcard", "web.deep.apps.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.50"},
+		{"nested wildcard parent exists", "deep.apps.home.arpa.", dns.TypeA, dns.RcodeSuccess, ""},
+		{"literal wildcard query", "*.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.10"},
+		{"wildcard does not match own subtree", "child.*.home.arpa.", dns.TypeA, dns.RcodeNameError, ""},
+		{"PTR unaffected", "10.1.168.192.in-addr.arpa.", dns.TypePTR, dns.RcodeNameError, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			response := queryServer(t, server, new(dns.Msg).SetQuestion(test.query, test.kind))
+			if response.Rcode != test.code || !response.Authoritative {
+				t.Fatalf("unexpected wildcard response: %s", response)
+			}
+			if test.value == "" {
+				if len(response.Answer) != 0 || len(response.Ns) != 1 || response.Ns[0].Header().Rrtype != dns.TypeSOA {
+					t.Fatalf("negative answer lacks SOA: %s", response)
+				}
+				return
+			}
+			if len(response.Answer) != 1 {
+				t.Fatalf("expected one A answer: %s", response)
+			}
+			answer, ok := response.Answer[0].(*dns.A)
+			if !ok || answer.A.String() != test.value || answer.Hdr.Name != strings.ToLower(test.query) || answer.Hdr.Ttl != 60 {
+				t.Fatalf("incorrect wildcard owner, address, or TTL: %s", response)
+			}
+		})
+	}
+}
+
+func TestServeDNSWildcardLeaseLifecycle(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		config := testConfig()
+		config.ARecords = map[string]netip.Addr{"*": netip.MustParseAddr("192.168.1.10")}
+		clientIP := netip.MustParseAddr("192.168.1.100")
+		manager, err := lease.New(lease.Config{
+			Domain: config.Domain, PoolStart: clientIP, PoolEnd: clientIP.Next(), LeaseDuration: time.Minute,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		server, err := New(config, manager, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check := func(name string, code int, address string) {
+			t.Helper()
+			response := queryServer(t, server, new(dns.Msg).SetQuestion(name, dns.TypeA))
+			if response.Rcode != code || !response.Authoritative {
+				t.Fatalf("unexpected response for %s: %s", name, response)
+			}
+			if address == "" {
+				if len(response.Answer) != 0 {
+					t.Fatalf("unexpected answer for %s: %s", name, response)
+				}
+				return
+			}
+			if len(response.Answer) != 1 || response.Answer[0].(*dns.A).A.String() != address {
+				t.Fatalf("expected %s for %s: %s", address, name, response)
+			}
+		}
+		check("host.dhcp.home.arpa.", dns.RcodeSuccess, "192.168.1.10")
+		if _, err := manager.Commit("client", clientIP, "host.dhcp.home.arpa"); err != nil {
+			t.Fatal(err)
+		}
+		check("host.dhcp.home.arpa.", dns.RcodeSuccess, clientIP.String())
+		check("dhcp.home.arpa.", dns.RcodeSuccess, "")
+		check("other.dhcp.home.arpa.", dns.RcodeNameError, "")
+		if _, err := manager.Commit("client", clientIP, "host.renamed.home.arpa"); err != nil {
+			t.Fatal(err)
+		}
+		check("host.dhcp.home.arpa.", dns.RcodeSuccess, "192.168.1.10")
+		check("dhcp.home.arpa.", dns.RcodeSuccess, "192.168.1.10")
+		check("host.renamed.home.arpa.", dns.RcodeSuccess, clientIP.String())
+		check("other.renamed.home.arpa.", dns.RcodeNameError, "")
+		if err := manager.Release("client", clientIP); err != nil {
+			t.Fatal(err)
+		}
+		check("host.renamed.home.arpa.", dns.RcodeSuccess, "192.168.1.10")
+		check("other.renamed.home.arpa.", dns.RcodeSuccess, "192.168.1.10")
+		if _, err := manager.Commit("client", clientIP, "host.expiring.home.arpa"); err != nil {
+			t.Fatal(err)
+		}
+		check("expiring.home.arpa.", dns.RcodeSuccess, "")
+		check("other.expiring.home.arpa.", dns.RcodeNameError, "")
+		time.Sleep(time.Minute)
+		check("host.expiring.home.arpa.", dns.RcodeSuccess, "192.168.1.10")
+		check("expiring.home.arpa.", dns.RcodeSuccess, "192.168.1.10")
+		check("other.expiring.home.arpa.", dns.RcodeSuccess, "192.168.1.10")
+	})
+}
+
+func TestServeDNSWildcardSingleLabelApex(t *testing.T) {
+	t.Parallel()
+	config := testConfig()
+	config.Domain = "lan"
+	config.ARecords = map[string]netip.Addr{"*": netip.MustParseAddr("192.168.1.10")}
+	clientIP := netip.MustParseAddr("192.168.1.100")
+	manager, err := lease.New(lease.Config{
+		Domain: config.Domain, PoolStart: clientIP, PoolEnd: clientIP.Next(), LeaseDuration: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Commit("client", clientIP, "lan"); err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(config, manager, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := queryServer(t, server, new(dns.Msg).SetQuestion("lan.", dns.TypeA))
+	if response.Rcode != dns.RcodeSuccess || len(response.Answer) != 0 || len(response.Ns) != 1 {
+		t.Fatalf("relative DHCP name or wildcard overrode zone apex: %s", response)
+	}
+	response = queryServer(t, server, new(dns.Msg).SetQuestion("lan.lan.", dns.TypeA))
+	if response.Rcode != dns.RcodeSuccess || len(response.Answer) != 1 || response.Answer[0].(*dns.A).A.String() != clientIP.String() {
+		t.Fatalf("DHCP name did not resolve below single-label zone: %s", response)
 	}
 }
 

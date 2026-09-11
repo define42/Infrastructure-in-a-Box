@@ -35,6 +35,8 @@ type Config struct {
 	HTTPSAddress  string
 	CADirectory   string
 	ACMEStateFile string
+	// ARecords maps canonical local DNS names (including wildcards) to IPv4 addresses.
+	ARecords map[string]netip.Addr
 }
 
 // config converts JSON string values into validated runtime settings.
@@ -77,6 +79,9 @@ func (settings fileSettings) config() (Config, error) {
 	}
 	cfg.Domain = strings.ToLower(strings.TrimSuffix(cfg.Domain, "."))
 	if err := validateDomain(cfg.Domain); err != nil {
+		return Config{}, err
+	}
+	if cfg.ARecords, err = parseARecords(cfg.Domain, settings.aRecords); err != nil {
 		return Config{}, err
 	}
 	if cfg.LeaseDuration, err = time.ParseDuration(settings.leaseDuration); err != nil {

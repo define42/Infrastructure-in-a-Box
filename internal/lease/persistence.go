@@ -75,9 +75,9 @@ func (m *Manager) restore() error {
 		if current.Hostname != "" {
 			names[current.Hostname] = true
 		}
-		if current.Hostname == "gateway."+m.cfg.Domain+"." {
-			// Older versions allowed this hostname. Preserve the client's lease
-			// while reserving gateway DNS for the built-in HTTPS server.
+		if m.reservedNames[current.Hostname] {
+			// Preserve existing address assignments when a hostname becomes
+			// reserved for static DNS or the built-in HTTPS server.
 			current.Hostname = ""
 		}
 		m.state.leases[current.ClientID] = current

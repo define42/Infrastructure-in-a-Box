@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -121,7 +122,7 @@ func TestLoadDefaults(t *testing.T) {
 		CADirectory:   filepath.Join(dir, "pki"),
 		ACMEStateFile: filepath.Join(dir, "pki", "acme.json"),
 	}
-	if cfg != expected {
+	if !reflect.DeepEqual(cfg, expected) {
 		t.Errorf("Load() = %+v, want %+v", cfg, expected)
 	}
 }

@@ -36,6 +36,9 @@ type Config struct {
 	LeaseDuration   time.Duration
 	OfferDuration   time.Duration
 	DeclineDuration time.Duration
+	// ReservedNames prevents DHCP clients from registering these DNS names.
+	// Names may be single labels or fully qualified names under Domain.
+	ReservedNames []string
 	// File enables atomic JSON persistence when nonempty. Offers are temporary
 	// reservations and are deliberately not restored after a restart.
 	File string
@@ -45,10 +48,11 @@ type Config struct {
 // New; its zero value is not usable. All exported methods are safe for concurrent
 // use. A single process must own the persistence file.
 type Manager struct {
-	mu    sync.Mutex
-	cfg   Config
-	now   func() time.Time
-	state state
+	mu            sync.Mutex
+	cfg           Config
+	now           func() time.Time
+	state         state
+	reservedNames map[string]bool
 }
 
 type state struct {
@@ -101,7 +105,29 @@ func newManager(cfg Config, now func() time.Time) (*Manager, error) {
 	if cfg.DeclineDuration == 0 {
 		cfg.DeclineDuration = 10 * time.Minute
 	}
-	m := &Manager{cfg: cfg, now: now, state: newState()}
+	reservedNames := map[string]bool{
+		"ns." + cfg.Domain + ".":      true,
+		"gateway." + cfg.Domain + ".": true,
+	}
+	for _, name := range cfg.ReservedNames {
+		// Check before case conversion, which can fold non-ASCII characters
+		// such as the Kelvin sign into otherwise valid ASCII hostnames.
+		for _, c := range name {
+			if c >= utf8.RuneSelf {
+				return nil, fmt.Errorf("reserved DNS name %q must contain only ASCII characters", name)
+			}
+		}
+		canonical := NormalizeHostname(name, cfg.Domain)
+		apex := strings.TrimSuffix(strings.ToLower(name), ".") == cfg.Domain
+		if canonical == "" || apex {
+			return nil, fmt.Errorf("reserved DNS name %q must be a hostname under %s", name, cfg.Domain)
+		}
+		reservedNames[canonical] = true
+	}
+	// The canonical map owns its keys; the caller's input slice is no longer
+	// needed and must not become shared mutable configuration.
+	cfg.ReservedNames = nil
+	m := &Manager{cfg: cfg, now: now, state: newState(), reservedNames: reservedNames}
 	if err := m.restore(); err != nil {
 		return nil, err
 	}
@@ -186,7 +212,7 @@ func (m *Manager) Commit(clientID string, ip netip.Addr, hostname string) (Lease
 			name = current.Hostname
 		}
 	}
-	if name == "ns."+m.cfg.Domain+"." || name == "gateway."+m.cfg.Domain+"." {
+	if m.reservedNames[name] {
 		name = ""
 	}
 	if name != "" {
@@ -249,7 +275,7 @@ func (m *Manager) LookupName(name string) (Lease, bool) {
 
 	m.expire(m.now())
 	name = NormalizeHostname(name, m.cfg.Domain)
-	if name == "" {
+	if name == "" || m.reservedNames[name] {
 		return Lease{}, false
 	}
 	for _, current := range m.state.leases {
@@ -258,6 +284,35 @@ func (m *Manager) LookupName(name string) (Lease, bool) {
 		}
 	}
 	return Lease{}, false
+}
+
+// HasName reports whether a DNS name has a live committed hostname at or below
+// it. Descendant names make their ancestors exist even without an address record
+// at the ancestor, which prevents DNS wildcard answers at those names. A single
+// label is resolved relative to the configured domain, except the domain itself.
+func (m *Manager) HasName(name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.expire(m.now())
+	canonical := strings.ToLower(strings.TrimSuffix(name, "."))
+	if canonical == m.cfg.Domain {
+		name = canonical + "."
+	} else {
+		name = NormalizeHostname(name, m.cfg.Domain)
+	}
+	if name == "" {
+		return false
+	}
+	for _, current := range m.state.leases {
+		if current.Hostname == "" || m.reservedNames[current.Hostname] {
+			continue
+		}
+		if current.Hostname == name || strings.HasSuffix(current.Hostname, "."+name) {
+			return true
+		}
+	}
+	return false
 }
 
 // LookupIP returns a live committed lease, even if it has no registered name.

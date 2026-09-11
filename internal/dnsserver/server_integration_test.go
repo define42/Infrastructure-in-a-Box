@@ -39,6 +39,105 @@ func TestRunUDPAndTCPIntegration(t *testing.T) {
 	}
 }
 
+func TestStaticARecordsUDPAndTCPIntegration(t *testing.T) {
+	t.Parallel()
+	config := testConfig()
+	config.ARecords = map[string]netip.Addr{
+		"NAS": netip.MustParseAddr("192.168.1.10"),
+		"@":   netip.MustParseAddr("10.0.0.20"),
+	}
+	address := startDNSServer(t, config, lease.Lease{
+		IP: netip.MustParseAddr("192.168.1.100"), Hostname: "nas.home.arpa.", ExpiresAt: time.Now().Add(time.Hour),
+	})
+	for _, network := range []string{"udp", "tcp"} {
+		t.Run(network, func(t *testing.T) {
+			t.Parallel()
+			client := dns.Client{Net: network, Timeout: time.Second}
+			for _, test := range []struct {
+				name string
+				ip   string
+			}{
+				{"nas.home.arpa.", "192.168.1.10"},
+				{"home.arpa.", "10.0.0.20"},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					response, _, err := client.Exchange(new(dns.Msg).SetQuestion(test.name, dns.TypeA), address)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if response.Rcode != dns.RcodeSuccess || !response.Authoritative || len(response.Answer) != 1 {
+						t.Fatalf("unexpected static response over %s: %s", network, response)
+					}
+					answer, ok := response.Answer[0].(*dns.A)
+					if !ok || answer.A.String() != test.ip || answer.Hdr.Ttl != 60 {
+						t.Fatalf("unexpected static answer over %s: %s", network, response)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestWildcardARecordsUDPAndTCPIntegration(t *testing.T) {
+	t.Parallel()
+	config := testConfig()
+	config.ARecords = map[string]netip.Addr{
+		"*":                    netip.MustParseAddr("192.168.1.10"),
+		"leaf.fixed.home.arpa": netip.MustParseAddr("192.168.1.20"),
+		"*.apps.home.arpa":     netip.MustParseAddr("192.168.1.30"),
+	}
+	address := startDNSServer(t, config, lease.Lease{
+		IP: netip.MustParseAddr("192.168.1.100"), Hostname: "laptop.home.arpa.", ExpiresAt: time.Now().Add(time.Hour),
+	})
+	for _, network := range []string{"udp", "tcp"} {
+		t.Run(network, func(t *testing.T) {
+			t.Parallel()
+			client := dns.Client{Net: network, Timeout: time.Second}
+			for _, test := range []struct {
+				name  string
+				query string
+				kind  uint16
+				code  int
+				ip    string
+			}{
+				{"wildcard", "web.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.10"},
+				{"multiple absent levels", "one.two.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.10"},
+				{"nested wildcard", "web.apps.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.30"},
+				{"static exact", "leaf.fixed.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.20"},
+				{"DHCP exact", "laptop.home.arpa.", dns.TypeA, dns.RcodeSuccess, "192.168.1.100"},
+				{"empty non-terminal", "fixed.home.arpa.", dns.TypeA, dns.RcodeSuccess, ""},
+				{"static shadowing", "other.fixed.home.arpa.", dns.TypeA, dns.RcodeNameError, ""},
+				{"DHCP shadowing", "child.laptop.home.arpa.", dns.TypeA, dns.RcodeNameError, ""},
+				{"AAAA NODATA", "web.home.arpa.", dns.TypeAAAA, dns.RcodeSuccess, ""},
+				{"apex NODATA", "home.arpa.", dns.TypeA, dns.RcodeSuccess, ""},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					response, _, err := client.Exchange(new(dns.Msg).SetQuestion(test.query, test.kind), address)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if response.Rcode != test.code || !response.Authoritative {
+						t.Fatalf("unexpected wildcard response over %s: %s", network, response)
+					}
+					if test.ip == "" {
+						if len(response.Answer) != 0 || len(response.Ns) != 1 || response.Ns[0].Header().Rrtype != dns.TypeSOA {
+							t.Fatalf("negative response lacks SOA over %s: %s", network, response)
+						}
+						return
+					}
+					if len(response.Answer) != 1 {
+						t.Fatalf("expected one wildcard answer over %s: %s", network, response)
+					}
+					answer, ok := response.Answer[0].(*dns.A)
+					if !ok || answer.A.String() != test.ip || answer.Hdr.Name != test.query || answer.Hdr.Ttl != 60 {
+						t.Fatalf("unexpected wildcard answer over %s: %s", network, response)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestRunStartupFailureClosesSiblingIntegration(t *testing.T) {
 	t.Parallel()
 	udp, err := net.ListenPacket("udp4", "127.0.0.1:0")

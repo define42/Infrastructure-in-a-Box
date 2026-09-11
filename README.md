@@ -8,6 +8,8 @@ certificate for download.
 An ACME v2 server issues certificates for active DHCP hostnames using HTTP-01.
 DHCP packet handling uses `github.com/insomniacslk/dhcp/dhcpv4`, and DNS uses
 `github.com/miekg/dns`.
+Static DNS A records, including wildcard records, can also be configured for
+services and devices.
 
 ## Build and run
 
@@ -144,9 +146,10 @@ API continues to use HTTPS on the gateway.
 
 Only active, committed DHCP registrations beneath `domain` can obtain
 certificates. The zone apex, reserved `gateway` and `ns` names, wildcard names,
-IP identifiers, external names, and names known only to an upstream resolver
-are rejected. Validation connects directly to the checked lease address within
-`subnet`; it does not use system DNS, upstream DNS, or HTTP proxies. The
+IP identifiers, external names, and names known only through static or wildcard
+DNS records or an upstream resolver are rejected. Validation connects directly
+to the checked lease address within `subnet`; it does not use system DNS,
+upstream DNS, or HTTP proxies. The
 challenge must return HTTP 200 directly: redirects are rejected. Validation
 has a five-second timeout and rechecks the lease owner and address before
 accepting the result. Every new order requires fresh authorization.
@@ -210,10 +213,11 @@ overrides are not supported. The file is read and validated at startup; restart
 the server after editing it.
 
 The file must contain one JSON object using the exact, lowercase keys below.
-All values are strings, including durations and listener addresses. Omitted
-optional settings use their defaults. Unknown or duplicate keys, `null`, values
-of other types, comments, trailing commas, and additional JSON values are
-rejected. The maximum file size is 1 MiB.
+Values are strings, including durations and listener addresses, except for
+`a_records`, which is an object mapping DNS names to IPv4 strings. Omitted
+optional settings use their defaults. Unknown or duplicate keys, `null`, invalid
+value types, comments, trailing commas, and additional JSON values are rejected.
+The maximum file size is 1 MiB.
 
 | JSON key | Default when omitted | Meaning |
 | --- | --- | --- |
@@ -230,6 +234,7 @@ rejected. The maximum file size is 1 MiB.
 | `dns_listen` | `<server_ip>:53` | DNS UDP and TCP listener; empty also selects this default. |
 | `upstream` | `""` | Optional numeric IPv4 address and port for external DNS, such as `1.1.1.1:53`; empty disables forwarding. |
 | `dns_ttl` | `1m` | Maximum TTL for DNS records, in whole seconds, at least `1s`. |
+| `a_records` | `{}` | Exact or wildcard local DNS names mapped to IPv4 address strings. |
 | `https_listen` | `<server_ip>:443` | Gateway HTTPS TCP listener; empty also selects this default. |
 | `ca_dir` | `pki` | Persistent directory for the private CA and gateway certificates. |
 | `acme_state` | `<ca_dir>/acme.json` | Persistent ACME accounts, orders, certificates, and revocations; empty also selects this default. Must differ from the lease and CA certificate/key files. |
@@ -260,8 +265,70 @@ must not point back to the DNS listener.
 
 By default, DNS serves local names only. To resolve public names as well, add
 `"upstream": "1.1.1.1:53"` or the address of your existing resolver. Local names are
-answered from lease state and never forwarded. Restrict access to the DNS ports
+answered from static records or lease state and never forwarded. Restrict access to the DNS ports
 to the network you intend to serve, particularly when forwarding is enabled.
+
+## Static DNS A records
+
+Add an `a_records` object to the JSON configuration, then restart the server:
+
+```json
+"a_records": {
+  "printer": "192.168.50.10",
+  "nas.home.arpa": "192.168.50.20",
+  "*.apps.home.arpa": "192.168.50.20",
+  "@": "192.168.50.2"
+}
+```
+
+With `"domain": "home.arpa"`, the exact records resolve `printer.home.arpa`,
+`nas.home.arpa`, and `home.arpa`. Use a single hostname or a fully qualified name
+within the configured domain; `@` means the domain itself. Names are case
+insensitive, and fully qualified names may end in a dot. Duplicate names after
+normalization, names outside the domain, and the reserved exact `ns` and
+`gateway` names are rejected. Each entry maps to one unicast IPv4 address.
+
+Static records are served over both UDP and TCP with the configured `dns_ttl`.
+They remain available independently of DHCP lease expiry. Exact static records
+take precedence over DHCP registrations. DHCP clients attempting to register an
+exact static name still receive an address, but no DNS name; an existing lease
+that conflicts with a new exact static name keeps its address and loses that
+hostname.
+
+For wildcard records, use `*` or `*.home.arpa` for the zone, or
+`*.apps.home.arpa` for a subdomain. The relative form `*.apps` also becomes
+`*.apps.home.arpa`. Only a complete leftmost `*` label is allowed; partial or
+multiple wildcards such as `app*` or `*.*.home.arpa` are rejected. Wildcards are
+used after infrastructure names, exact static records, and active DHCP names.
+They do not reserve matching DHCP names, so a client can register a name covered
+by a wildcard and receive its own DNS record.
+
+Wildcard matching follows the closest-encloser rules in
+[RFC 4592](https://www.rfc-editor.org/rfc/rfc4592.html#section-3.3.1): missing
+names can match at any depth, but an existing name or intervening parent blocks
+a broader wildcard. Parents implied by child records count as existing names.
+For example, `*.apps.home.arpa` can answer both `shop.apps.home.arpa` and
+`api.dev.apps.home.arpa` while `dev.apps.home.arpa` has no records or children.
+Adding `status.dev.apps.home.arpa` creates that parent and prevents
+`api.dev.apps.home.arpa` from using `*.apps.home.arpa`; add `*.dev.apps.home.arpa`
+to provide a wildcard there. A wildcard never matches its own parent, so
+`*.apps.home.arpa` does not supply an A record for `apps.home.arpa` itself.
+
+These entries create A records only. They do not create PTR records or DHCP IP
+reservations. For devices configured with fixed IPs, use addresses outside the
+DHCP pool. Targets may also be reachable IPv4 addresses outside the local subnet.
+ACME authorization still requires an exact, active DHCP registration. A name
+resolved only through a static or wildcard record is not eligible, and wildcard
+certificates are not supported. Restart after editing `a_records`; cached DNS
+answers may remain until their TTL expires.
+
+For the example above, check both DNS transports with:
+
+```sh
+dig @192.168.50.2 printer.home.arpa A
+dig +tcp @192.168.50.2 nas.home.arpa A
+dig @192.168.50.2 shop.apps.home.arpa A
+```
 
 ## Lease and DNS behavior
 
@@ -270,12 +337,14 @@ to the network you intend to serve, particularly when forwarding is enabled.
 - Active leases drive both forward A records and reverse PTR records. DNS TTLs
   are capped by the remaining lease lifetime. Client resolvers may retain a
   previously cached answer until its TTL expires after a release or rename.
-- Renewals update the lease lifetime. Expired, released, or declined leases stop
-  resolving. Declined addresses are temporarily quarantined from allocation.
+- Renewals update the lease lifetime. Expired, released, or declined leases lose
+  their DHCP DNS records; a configured wildcard may then answer for the name.
+  Declined addresses are temporarily quarantined from allocation.
 - Hostnames are normalized to lowercase. Clients may supply a single label, such
   as `laptop`, or a fully qualified name under the configured local domain.
-  Invalid or out-of-domain names, the reserved `ns` and `gateway` names, and
-  duplicate names still receive a DHCP address but no DNS registration. A
+  Invalid or out-of-domain names, names reserved by exact static A records, the
+  reserved `ns` and `gateway` names, and duplicate names still receive a DHCP
+  address but no DNS registration. A
   duplicate cannot replace another client's active record. A hostname supplied only during
   discovery is retained for the subsequent request; renewals that omit a name
   retain the previous registration.

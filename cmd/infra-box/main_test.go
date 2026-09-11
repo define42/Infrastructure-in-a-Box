@@ -10,12 +10,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/define42/Infrastructure-in-a-Box/internal/acmevalidate"
 	"github.com/define42/Infrastructure-in-a-Box/internal/config"
-	"github.com/define42/Infrastructure-in-a-Box/internal/lease"
 )
 
 func TestNewGatewayInitializesCAAndACME(t *testing.T) {
@@ -40,10 +41,7 @@ func TestNewGatewayInitializesCAAndACME(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	leases, err := lease.New(lease.Config{
-		Domain: cfg.Domain, PoolStart: cfg.PoolStart,
-		PoolEnd: cfg.PoolEnd, LeaseDuration: cfg.LeaseDuration, File: cfg.LeaseFile,
-	})
+	leases, err := newLeaseManager(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +89,67 @@ func TestNewGatewayInitializesCAAndACME(t *testing.T) {
 	}
 	if current, err := os.ReadFile(configPath); err != nil || !bytes.Equal(current, data) {
 		t.Fatalf("startup modified configuration: %v", err)
+	}
+}
+
+func TestStaticDNSNamesAreReservedAtStartup(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := []byte(`{
+		"interface": "eth0",
+		"server_ip": "192.168.50.2",
+		"subnet": "192.168.50.0/24",
+		"pool_start": "192.168.50.100",
+		"pool_end": "192.168.50.200",
+		"lease_file": "",
+		"a_records": {
+			"printer": "192.168.50.10", "@": "192.168.50.2",
+			"*": "192.168.50.20", "*.apps.home.arpa": "192.168.50.30"
+		}
+	}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Parse([]string{"-config", path}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leases, err := newLeaseManager(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assigned, err := leases.Commit("client-1", cfg.PoolStart, "printer")
+	if err != nil || assigned.Hostname != "" || assigned.IP != cfg.PoolStart {
+		t.Fatalf("static name claimed through DHCP: %+v, %v", assigned, err)
+	}
+	validator, err := acmevalidate.New(acmevalidate.Config{Domain: cfg.Domain, Subnet: cfg.Subnet}, leases)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validator.Lookup("printer.home.arpa"); !errors.Is(err, acmevalidate.ErrRejectedIdentifier) {
+		t.Fatalf("static DNS name obtained DHCP authorization: %v", err)
+	}
+	assigned, err = leases.Commit("client-2", cfg.PoolStart.Next(), "laptop")
+	if err != nil || assigned.Hostname != "laptop.home.arpa." {
+		t.Fatalf("unrelated DHCP hostname failed: %+v, %v", assigned, err)
+	}
+	if _, err := validator.Lookup("laptop.home.arpa"); err != nil {
+		t.Fatalf("unrelated DHCP authorization failed: %v", err)
+	}
+	assigned, err = leases.Commit("client-3", cfg.PoolStart.Next().Next(), "dashboard.apps.home.arpa")
+	if err != nil || assigned.Hostname != "dashboard.apps.home.arpa." {
+		t.Fatalf("wildcard blocked a DHCP hostname: %+v, %v", assigned, err)
+	}
+	if _, err := validator.Lookup("dashboard.apps.home.arpa"); err != nil {
+		t.Fatalf("wildcard blocked exact DHCP authorization: %v", err)
+	}
+	for _, name := range []string{"*.home.arpa", "*.apps.home.arpa", "missing.apps.home.arpa"} {
+		if _, err := validator.Lookup(name); !errors.Is(err, acmevalidate.ErrRejectedIdentifier) {
+			t.Errorf("wildcard granted authorization for %q: %v", name, err)
+		}
+	}
+	if cfg.ARecords["printer.home.arpa."] != netip.MustParseAddr("192.168.50.10") {
+		t.Fatal("static address changed during DHCP registration")
 	}
 }
 

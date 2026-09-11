@@ -105,6 +105,7 @@ type fileSettings struct {
 	cfg                                          Config
 	serverIP, subnet, poolStart, poolEnd, router string
 	leaseDuration, dnsTTL                        string
+	aRecords                                     map[string]string
 }
 
 func (settings *fileSettings) decode(data []byte) error {
@@ -144,14 +145,21 @@ func (settings *fileSettings) decode(data []byte) error {
 		if !ok {
 			return errors.New("configuration keys must be strings")
 		}
-		target, ok := fields[key]
-		if !ok {
-			return fmt.Errorf("unknown configuration key %q", key)
-		}
 		if seen[key] {
 			return fmt.Errorf("duplicate configuration key %q", key)
 		}
 		seen[key] = true
+		if key == "a_records" {
+			settings.aRecords, err = decodeARecords(decoder)
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		target, ok := fields[key]
+		if !ok {
+			return fmt.Errorf("unknown configuration key %q", key)
+		}
 		token, err = decoder.Token()
 		if err != nil {
 			return fmt.Errorf("read %s: %w", key, err)

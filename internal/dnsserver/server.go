@@ -1,4 +1,4 @@
-// Package dnsserver serves infrastructure hostnames and active DHCP leases.
+// Package dnsserver serves static records, infrastructure hostnames, and active DHCP leases.
 package dnsserver
 
 import (
@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/define42/Infrastructure-in-a-Box/internal/dnsname"
 	"github.com/define42/Infrastructure-in-a-Box/internal/lease"
 	"github.com/miekg/dns"
 )
@@ -26,6 +27,8 @@ const (
 type Registry interface {
 	LookupName(name string) (lease.Lease, bool)
 	LookupIP(ip netip.Addr) (lease.Lease, bool)
+	// HasName reports an active hostname or an ancestor of an active hostname.
+	HasName(name string) bool
 }
 
 // Config configures the local authoritative zone and optional DNS forwarding.
@@ -34,6 +37,9 @@ type Config struct {
 	Domain   string
 	ServerIP netip.Addr
 	Subnet   netip.Prefix
+	// ARecords maps local hostnames and wildcard names to static IPv4 addresses.
+	// Exact static records take precedence over DHCP names and do not create PTRs.
+	ARecords map[string]netip.Addr
 	// Upstream is a literal IP address and port, such as "1.1.1.1:53".
 	Upstream string
 	// TTL caps positive record lifetimes. Zero disables caching.
@@ -47,6 +53,7 @@ type Server struct {
 	logger      *slog.Logger
 	nsName      string
 	gatewayName string
+	staticNames map[string]struct{}
 	ttl         uint32
 	forwards    chan struct{}
 }
@@ -63,6 +70,11 @@ func New(config Config, registry Registry, logger *slog.Logger) (*Server, error)
 	if !validDomain(config.Domain) {
 		return nil, errors.New("DNS domain must be a valid non-root hostname")
 	}
+	aRecords, err := normalizeARecords(config.Domain, config.ARecords)
+	if err != nil {
+		return nil, err
+	}
+	config.ARecords = aRecords
 	if !config.ServerIP.Is4() || !config.Subnet.IsValid() || !config.Subnet.Addr().Is4() || !config.Subnet.Contains(config.ServerIP) {
 		return nil, errors.New("DNS server IP must be IPv4 and within the IPv4 subnet")
 	}
@@ -86,12 +98,46 @@ func New(config Config, registry Registry, logger *slog.Logger) (*Server, error)
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{
+	server := &Server{
 		config: config, registry: registry, logger: logger,
 		nsName: "ns." + config.Domain, ttl: uint32(config.TTL / time.Second),
 		gatewayName: "gateway." + config.Domain,
-		forwards:    make(chan struct{}, 128),
-	}, nil
+		staticNames: map[string]struct{}{
+			config.Domain:              {},
+			"ns." + config.Domain:      {},
+			"gateway." + config.Domain: {},
+		},
+		forwards: make(chan struct{}, 128),
+	}
+	for name := range config.ARecords {
+		for name != config.Domain {
+			server.staticNames[name] = struct{}{}
+			next, _ := dns.NextLabel(name, 0)
+			name = name[next:]
+		}
+	}
+	return server, nil
+}
+
+func normalizeARecords(domain string, records map[string]netip.Addr) (map[string]netip.Addr, error) {
+	normalized := make(map[string]netip.Addr, len(records))
+	for name, ip := range records {
+		canonical := dnsname.NormalizeARecord(name, domain)
+		if canonical == "" {
+			return nil, fmt.Errorf("DNS A record %q must name a host within %s", name, domain)
+		}
+		if canonical == "ns."+domain || canonical == "gateway."+domain {
+			return nil, fmt.Errorf("DNS A record %q conflicts with a reserved infrastructure hostname", name)
+		}
+		if _, exists := normalized[canonical]; exists {
+			return nil, fmt.Errorf("DNS A record %q duplicates hostname %s", name, canonical)
+		}
+		if !ip.Is4() || !ip.IsGlobalUnicast() {
+			return nil, fmt.Errorf("DNS A record %q must have a unicast IPv4 address", name)
+		}
+		normalized[canonical] = ip
+	}
+	return normalized, nil
 }
 
 func validateAddress(address string, listen bool) error {
@@ -260,16 +306,10 @@ func (s *Server) answerLocal(response *dns.Msg, name string, kind uint16, zone s
 		}
 	}
 	if zone == s.config.Domain {
-		if name == s.nsName || name == s.gatewayName {
-			exists = true
-			if kind == dns.TypeA || kind == dns.TypeANY {
-				response.Answer = append(response.Answer, s.addressRecord(name, s.config.ServerIP, s.ttl))
-			}
-		} else if entry, found := s.registry.LookupName(name); found && time.Now().Before(entry.ExpiresAt) {
-			exists = true
-			if kind == dns.TypeA || kind == dns.TypeANY {
-				response.Answer = append(response.Answer, s.addressRecord(name, entry.IP, s.leaseTTL(entry)))
-			}
+		address, ttl, found := s.lookupLocalAddress(name)
+		exists = found
+		if address.IsValid() && (kind == dns.TypeA || kind == dns.TypeANY) {
+			response.Answer = append(response.Answer, s.addressRecord(name, address, ttl))
 		}
 	} else if ip.IsValid() {
 		if ip == s.config.ServerIP {
@@ -294,6 +334,42 @@ func (s *Server) answerLocal(response *dns.Msg, name string, kind uint16, zone s
 		soa.Hdr.Ttl, soa.Minttl = 0, 0
 		response.Ns = append(response.Ns, soa)
 	}
+}
+
+// lookupLocalAddress also reports existing names without an A record, including
+// the zone apex and empty non-terminals created by static or DHCP descendants.
+func (s *Server) lookupLocalAddress(name string) (netip.Addr, uint32, bool) {
+	if name == s.nsName || name == s.gatewayName {
+		return s.config.ServerIP, s.ttl, true
+	}
+	if address, found := s.config.ARecords[name]; found {
+		return address, s.ttl, true
+	}
+	if name == s.config.Domain {
+		return netip.Addr{}, 0, true
+	}
+	if entry, found := s.registry.LookupName(name); found && time.Now().Before(entry.ExpiresAt) {
+		return entry.IP, s.leaseTTL(entry), true
+	}
+	if s.hasName(name) {
+		return netip.Addr{}, 0, true
+	}
+	// RFC 4592 permits synthesis only at the closest existing ancestor. An
+	// ancestor without a wildcard blocks every broader wildcard in the zone.
+	for name != s.config.Domain {
+		next, _ := dns.NextLabel(name, 0)
+		name = name[next:]
+		if s.hasName(name) {
+			address, found := s.config.ARecords["*."+name]
+			return address, s.ttl, found
+		}
+	}
+	return netip.Addr{}, 0, false
+}
+
+func (s *Server) hasName(name string) bool {
+	_, exists := s.staticNames[name]
+	return exists || s.registry.HasName(name)
 }
 
 func header(name string, kind uint16, ttl uint32) dns.RR_Header {

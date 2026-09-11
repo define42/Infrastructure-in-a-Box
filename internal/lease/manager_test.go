@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -429,5 +430,193 @@ func TestConcurrentAllocationNeverDuplicatesAddresses(t *testing.T) {
 	}
 	if len(addresses) != poolSize || exhausted != clients-poolSize {
 		t.Fatalf("allocated %d addresses, exhausted %d clients; want %d and %d", len(addresses), exhausted, poolSize, clients-poolSize)
+	}
+}
+
+func TestHasNameFindsExactNamesAndAncestors(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+	m, _ := testManager(t, cfg)
+	if _, err := m.Commit("client", cfg.PoolStart, "host.office.home.arpa"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"host.office.home.arpa.", "HOST.OFFICE.HOME.ARPA", "office", "OFFICE.HOME.ARPA.", "home.arpa", "HOME.ARPA.",
+	} {
+		if !m.HasName(name) {
+			t.Errorf("HasName(%q) did not find the committed name or its ancestor", name)
+		}
+	}
+	for _, name := range []string{
+		"", "missing", "host", "host.office", "host.office.example", "other.office.home.arpa", "office.home.arpa..",
+		"child.host.office.home.arpa", "fice.home.arpa", "officehome.arpa", "*.home.arpa", " home.arpa", "arpa", ".",
+	} {
+		if m.HasName(name) {
+			t.Errorf("HasName(%q) matched an unrelated or invalid name", name)
+		}
+	}
+}
+
+func TestHasNameIgnoresOffersAndUnregisteredNames(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+	cfg.ReservedNames = []string{"printer.office.home.arpa"}
+	m, _ := testManager(t, cfg)
+	if _, err := m.Offer("offered", cfg.PoolStart, "host.office.home.arpa"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Commit("reserved", cfg.PoolStart.Next(), "printer.office.home.arpa"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Commit("unnamed", cfg.PoolEnd, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"host.office.home.arpa", "printer.office.home.arpa", "office", "home.arpa"} {
+		if m.HasName(name) {
+			t.Errorf("HasName(%q) counted a hostname that was not registered", name)
+		}
+	}
+	if _, err := m.Commit("offered", cfg.PoolStart, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !m.HasName("office") || !m.HasName("host.office.home.arpa") {
+		t.Fatal("committing the offer did not publish its hostname and ancestor")
+	}
+}
+
+func TestHasNameTracksLeaseChanges(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		change func(*Manager, Lease, *time.Time) error
+	}{
+		{name: "release", change: func(m *Manager, current Lease, _ *time.Time) error {
+			return m.Release(current.ClientID, current.IP)
+		}},
+		{name: "decline", change: func(m *Manager, current Lease, _ *time.Time) error {
+			return m.Decline(current.ClientID, current.IP)
+		}},
+		{name: "rename", change: func(m *Manager, current Lease, _ *time.Time) error {
+			_, err := m.Commit(current.ClientID, current.IP, "host.lab.home.arpa")
+			return err
+		}},
+		{name: "clear hostname", change: func(m *Manager, current Lease, _ *time.Time) error {
+			_, err := m.Commit(current.ClientID, current.IP, "invalid_name")
+			return err
+		}},
+		{name: "expire", change: func(_ *Manager, current Lease, now *time.Time) error {
+			*now = current.ExpiresAt
+			return nil
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := testConfig()
+			m, now := testManager(t, cfg)
+			current, err := m.Commit("client", cfg.PoolStart, "host.office.home.arpa")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !m.HasName("office") || !m.HasName(current.Hostname) {
+				t.Fatal("new lease's hostname or ancestor did not exist")
+			}
+			if err := tc.change(m, current, now); err != nil {
+				t.Fatal(err)
+			}
+			if m.HasName("office") || m.HasName(current.Hostname) {
+				t.Fatal("lease change left the old hostname or ancestor registered")
+			}
+			if tc.name == "rename" {
+				if !m.HasName("lab") || !m.HasName("host.lab.home.arpa") || !m.HasName("home.arpa") {
+					t.Fatal("rename failed to register the new hostname and ancestors")
+				}
+			} else if m.HasName("home.arpa") {
+				t.Fatal("domain still counted a lease without an active hostname")
+			}
+		})
+	}
+}
+
+func TestHasNameKeepsAncestorUntilLastDescendantDisappears(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+	cfg.ReservedNames = []string{"office"}
+	m, _ := testManager(t, cfg)
+	first, err := m.Commit("first", cfg.PoolStart, "first.office.home.arpa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := m.Commit("second", cfg.PoolStart.Next(), "second.office.home.arpa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Hostname == "" || second.Hostname == "" || !m.HasName("office") {
+		t.Fatal("an exact reservation prevented descendant hostnames from registering their ancestor")
+	}
+	if err := m.Release(first.ClientID, first.IP); err != nil {
+		t.Fatal(err)
+	}
+	if !m.HasName("office") || m.HasName(first.Hostname) {
+		t.Fatal("releasing one descendant removed its sibling's ancestor or retained the released name")
+	}
+	if err := m.Release(second.ClientID, second.IP); err != nil {
+		t.Fatal(err)
+	}
+	if m.HasName("office") {
+		t.Fatal("ancestor still exists after the last registered descendant was released")
+	}
+}
+
+func TestHasNameRestoresRegisteredNamesOnly(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+	cfg.File = filepath.Join(t.TempDir(), "leases.json")
+	m, now := testManager(t, cfg)
+	current, err := m.Commit("client", cfg.PoolStart, "host.office.home.arpa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := newManager(cfg, func() time.Time { return *now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !restored.HasName("office") || !restored.HasName(current.Hostname) || !restored.HasName("home.arpa") {
+		t.Fatal("restored lease did not register its hostname and ancestors")
+	}
+	cfg.ReservedNames = []string{current.Hostname}
+	reserved, err := newManager(cfg, func() time.Time { return *now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reserved.HasName("office") || reserved.HasName(current.Hostname) || reserved.HasName("home.arpa") {
+		t.Fatal("restored reserved hostname counted as an existing name")
+	}
+	cfg.ReservedNames = nil
+	*now = current.ExpiresAt
+	expired, err := newManager(cfg, func() time.Time { return *now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expired.HasName("office") || expired.HasName(current.Hostname) || expired.HasName("home.arpa") {
+		t.Fatal("restored expired lease counted as an existing name")
+	}
+}
+
+func TestHasNameRecognizesSingleLabelDomain(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+	cfg.Domain = "lan"
+	m, _ := testManager(t, cfg)
+	if m.HasName("lan") {
+		t.Fatal("empty lease registry counted as a registered domain")
+	}
+	if _, err := m.Commit("client", cfg.PoolStart, "host"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"lan", "LAN.", "host", "HOST.LAN."} {
+		if !m.HasName(name) {
+			t.Errorf("HasName(%q) did not find a hostname under the single-label domain", name)
+		}
 	}
 }
