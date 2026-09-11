@@ -186,7 +186,7 @@ func (m *Manager) Commit(clientID string, ip netip.Addr, hostname string) (Lease
 			name = current.Hostname
 		}
 	}
-	if name == "ns."+m.cfg.Domain+"." {
+	if name == "ns."+m.cfg.Domain+"." || name == "gateway."+m.cfg.Domain+"." {
 		name = ""
 	}
 	if name != "" {

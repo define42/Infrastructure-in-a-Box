@@ -31,6 +31,8 @@ func TestParseDefaults(t *testing.T) {
 		LeaseDuration: 12 * time.Hour,
 		LeaseFile:     "leases.json",
 		DNSTTL:        time.Minute,
+		HTTPSAddress:  "192.168.50.2:443",
+		CADirectory:   "pki",
 	}
 	if cfg != expected {
 		t.Errorf("Parse() = %+v, want %+v", cfg, expected)
@@ -48,6 +50,8 @@ func TestParseOverrides(t *testing.T) {
 		"-dns-listen", ":1053",
 		"-dhcp-listen", "192.168.50.2:1067",
 		"-upstream", "127.0.0.1:53",
+		"-https-listen", ":8443",
+		"-ca-dir", "/var/lib/infra-box/pki",
 	)
 	cfg, err := config.Parse(args, io.Discard)
 	if err != nil {
@@ -61,6 +65,9 @@ func TestParseOverrides(t *testing.T) {
 	}
 	if cfg.DNSAddress != ":1053" || cfg.DHCPAddress != "192.168.50.2:1067" || cfg.Upstream != "127.0.0.1:53" {
 		t.Errorf("incorrect listener settings: %+v", cfg)
+	}
+	if cfg.HTTPSAddress != ":8443" || cfg.CADirectory != "/var/lib/infra-box/pki" {
+		t.Errorf("incorrect HTTPS/CA settings: %+v", cfg)
 	}
 }
 
@@ -287,6 +294,46 @@ func TestParseRejectsInvalidConfiguration(t *testing.T) {
 			want: "different udp ports",
 		},
 		{
+			name: "https and dns tcp conflict",
+			args: []string{"-https-listen", ":53"},
+			want: "different tcp ports",
+		},
+		{
+			name: "https hostname needs resolution",
+			args: []string{"-https-listen", "gateway.home.arpa:443"},
+			want: "numeric ipv4",
+		},
+		{
+			name: "https not advertised server",
+			args: []string{"-https-listen", "192.168.50.3:443"},
+			want: "-https-listen must bind",
+		},
+		{
+			name: "zero https port",
+			args: []string{"-https-listen", ":0"},
+			want: "between 1 and 65535",
+		},
+		{
+			name: "large https port",
+			args: []string{"-https-listen", ":65536"},
+			want: "between 1 and 65535",
+		},
+		{
+			name: "ipv6 https listener",
+			args: []string{"-https-listen", "[::]:443"},
+			want: "numeric ipv4",
+		},
+		{
+			name: "empty CA directory",
+			args: []string{"-ca-dir", ""},
+			want: "persistent directory",
+		},
+		{
+			name: "blank CA directory",
+			args: []string{"-ca-dir", " "},
+			want: "persistent directory",
+		},
+		{
 			name: "zero dns port",
 			args: []string{"-dns-listen", ":0"},
 			want: "between 1 and 65535",
@@ -391,7 +438,11 @@ func TestParseBoundaryValues(t *testing.T) {
 		},
 		{
 			name: "wildcard listeners",
-			args: []string{"-dhcp-listen", "0.0.0.0:67", "-dns-listen", "0.0.0.0:53"},
+			args: []string{"-dhcp-listen", "0.0.0.0:67", "-dns-listen", "0.0.0.0:53", "-https-listen", "0.0.0.0:443"},
+		},
+		{
+			name: "dhcp and https use separate transports",
+			args: []string{"-https-listen", ":67"},
 		},
 		{
 			name: "upstream same server different port",

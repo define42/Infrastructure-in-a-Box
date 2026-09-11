@@ -1,4 +1,4 @@
-// Package dnsserver serves DNS records for active DHCP leases.
+// Package dnsserver serves infrastructure hostnames and active DHCP leases.
 package dnsserver
 
 import (
@@ -42,12 +42,13 @@ type Config struct {
 
 // Server serves a forward zone and reverse records within the configured subnet.
 type Server struct {
-	config   Config
-	registry Registry
-	logger   *slog.Logger
-	nsName   string
-	ttl      uint32
-	forwards chan struct{}
+	config      Config
+	registry    Registry
+	logger      *slog.Logger
+	nsName      string
+	gatewayName string
+	ttl         uint32
+	forwards    chan struct{}
 }
 
 // New validates config without opening network sockets.
@@ -88,7 +89,8 @@ func New(config Config, registry Registry, logger *slog.Logger) (*Server, error)
 	return &Server{
 		config: config, registry: registry, logger: logger,
 		nsName: "ns." + config.Domain, ttl: uint32(config.TTL / time.Second),
-		forwards: make(chan struct{}, 128),
+		gatewayName: "gateway." + config.Domain,
+		forwards:    make(chan struct{}, 128),
 	}, nil
 }
 
@@ -258,7 +260,7 @@ func (s *Server) answerLocal(response *dns.Msg, name string, kind uint16, zone s
 		}
 	}
 	if zone == s.config.Domain {
-		if name == s.nsName {
+		if name == s.nsName || name == s.gatewayName {
 			exists = true
 			if kind == dns.TypeA || kind == dns.TypeANY {
 				response.Answer = append(response.Answer, s.addressRecord(name, s.config.ServerIP, s.ttl))

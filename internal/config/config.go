@@ -1,4 +1,4 @@
-// Package config parses and validates configuration for the DHCP and DNS service.
+// Package config parses and validates configuration for the infrastructure service.
 package config
 
 import (
@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// Config describes a single IPv4 subnet served by both DHCP and DNS.
+// Config describes a single IPv4 subnet served by DHCP, DNS, and an HTTPS gateway.
 // An invalid Router means no default gateway is advertised; an empty LeaseFile
 // disables persistence and an empty Upstream disables external DNS forwarding.
 type Config struct {
@@ -32,6 +32,8 @@ type Config struct {
 	LeaseFile     string
 	Upstream      string
 	DNSTTL        time.Duration
+	HTTPSAddress  string
+	CADirectory   string
 }
 
 // Parse validates command-line arguments without opening sockets or inspecting
@@ -119,6 +121,18 @@ func Parse(args []string, output io.Writer) (Config, error) {
 		time.Minute,
 		"maximum DNS record TTL, in whole seconds (minimum 1s)",
 	)
+	flags.StringVar(
+		&cfg.HTTPSAddress,
+		"https-listen",
+		"",
+		"gateway HTTPS listen address (default <server-ip>:443)",
+	)
+	flags.StringVar(
+		&cfg.CADirectory,
+		"ca-dir",
+		"pki",
+		"private CA and gateway certificate directory (must persist across restarts)",
+	)
 	if err := flags.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -167,6 +181,12 @@ func Parse(args []string, output io.Writer) (Config, error) {
 	}
 	if cfg.DNSAddress == "" {
 		cfg.DNSAddress = net.JoinHostPort(cfg.ServerIP.String(), "53")
+	}
+	if cfg.HTTPSAddress == "" {
+		cfg.HTTPSAddress = net.JoinHostPort(cfg.ServerIP.String(), "443")
+	}
+	if strings.TrimSpace(cfg.CADirectory) == "" {
+		return Config{}, errors.New("-ca-dir must name a persistent directory")
 	}
 	if err := cfg.validateListeners(); err != nil {
 		return Config{}, err
@@ -274,14 +294,24 @@ func (c Config) validateListeners() error {
 	if err != nil {
 		return err
 	}
+	https, err := parseAddress("https-listen", c.HTTPSAddress, true)
+	if err != nil {
+		return err
+	}
 	if !dhcp.Addr().IsUnspecified() && dhcp.Addr() != c.ServerIP {
 		return errors.New("-dhcp-listen must bind to all ipv4 addresses or -server-ip")
 	}
 	if !dns.Addr().IsUnspecified() && dns.Addr() != c.ServerIP {
 		return errors.New("-dns-listen must bind to all ipv4 addresses or -server-ip")
 	}
+	if !https.Addr().IsUnspecified() && https.Addr() != c.ServerIP {
+		return errors.New("-https-listen must bind to all ipv4 addresses or -server-ip")
+	}
 	if dhcp.Port() == dns.Port() {
 		return errors.New("-dhcp-listen and -dns-listen must use different udp ports")
+	}
+	if https.Port() == dns.Port() {
+		return errors.New("-https-listen and -dns-listen must use different tcp ports")
 	}
 	if c.Upstream == "" {
 		return nil

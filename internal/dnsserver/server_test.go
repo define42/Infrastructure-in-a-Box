@@ -2,10 +2,13 @@ package dnsserver
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -121,6 +124,9 @@ func TestServeDNSLeaseRecords(t *testing.T) {
 		{"expired host", "expired.home.arpa.", dns.TypeA, dns.RcodeNameError, true, 0, ""},
 		{"expired PTR", "101.1.168.192.in-addr.arpa.", dns.TypePTR, dns.RcodeNameError, true, 0, ""},
 		{"server A", "ns.home.arpa.", dns.TypeA, dns.RcodeSuccess, true, dns.TypeA, "192.168.1.1"},
+		{"gateway A", "gateway.home.arpa.", dns.TypeA, dns.RcodeSuccess, true, dns.TypeA, "192.168.1.1"},
+		{"gateway case insensitive", "GaTeWaY.HoMe.ArPa.", dns.TypeA, dns.RcodeSuccess, true, dns.TypeA, "192.168.1.1"},
+		{"gateway without IPv6", "gateway.home.arpa.", dns.TypeAAAA, dns.RcodeSuccess, true, 0, ""},
 		{"server PTR", "1.1.168.192.in-addr.arpa.", dns.TypePTR, dns.RcodeSuccess, true, dns.TypePTR, "ns.home.arpa."},
 		{"forward SOA", "home.arpa.", dns.TypeSOA, dns.RcodeSuccess, true, dns.TypeSOA, ""},
 		{"forward NS", "home.arpa.", dns.TypeNS, dns.RcodeSuccess, true, dns.TypeNS, "ns.home.arpa."},
@@ -200,6 +206,73 @@ func TestServeDNSBounds(t *testing.T) {
 				t.Fatalf("rcode = %d; want %d", response.Rcode, test.code)
 			}
 		})
+	}
+}
+
+func TestServeDNSGatewayOverridesLease(t *testing.T) {
+	t.Parallel()
+	config := testConfig()
+	config.Domain = " HOME.ARPA. "
+	server := newTestServer(t, config, lease.Lease{
+		IP: netip.MustParseAddr("192.168.1.100"), Hostname: "gateway.home.arpa.", ExpiresAt: time.Now().Add(time.Hour),
+	})
+	response := queryServer(t, server, new(dns.Msg).SetQuestion("gateway.home.arpa.", dns.TypeA))
+	if response.Rcode != dns.RcodeSuccess || !response.Authoritative || len(response.Answer) != 1 {
+		t.Fatalf("unexpected gateway response: %s", response)
+	}
+	answer, ok := response.Answer[0].(*dns.A)
+	if !ok || answer.A.String() != config.ServerIP.String() {
+		t.Fatalf("lease overrode gateway address: %s", response)
+	}
+}
+
+func TestServeDNSGatewayMigratesSavedLease(t *testing.T) {
+	t.Parallel()
+	config := testConfig()
+	savedLease := lease.Lease{
+		ClientID: "legacy-client", IP: netip.MustParseAddr("192.168.1.100"),
+		Hostname: "gateway.home.arpa.", ExpiresAt: time.Now().Add(time.Hour).UTC(),
+	}
+	leaseFile := filepath.Join(t.TempDir(), "leases.json")
+	data, err := json.Marshal(struct {
+		Version int           `json:"version"`
+		Leases  []lease.Lease `json:"leases"`
+	}{Version: 1, Leases: []lease.Lease{savedLease}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(leaseFile, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := lease.New(lease.Config{
+		PoolStart: savedLease.IP, PoolEnd: savedLease.IP.Next(), Domain: config.Domain,
+		LeaseDuration: time.Hour, File: leaseFile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(config, manager, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := queryServer(t, server, new(dns.Msg).SetQuestion("gateway.home.arpa.", dns.TypeA))
+	if response.Rcode != dns.RcodeSuccess || len(response.Answer) != 1 {
+		t.Fatalf("legacy lease prevented gateway resolution: %s", response)
+	}
+	answer, ok := response.Answer[0].(*dns.A)
+	if !ok || answer.A.String() != config.ServerIP.String() {
+		t.Fatalf("legacy lease overrode gateway address: %s", response)
+	}
+	reverse, err := dns.ReverseAddr(savedLease.IP.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = queryServer(t, server, new(dns.Msg).SetQuestion(reverse, dns.TypePTR))
+	if response.Rcode != dns.RcodeNameError || len(response.Answer) != 0 {
+		t.Fatalf("legacy lease retained gateway reverse registration: %s", response)
+	}
+	if current, ok := manager.LookupIP(savedLease.IP); !ok || current.ClientID != savedLease.ClientID {
+		t.Fatalf("legacy lease lost address ownership: %+v, %v", current, ok)
 	}
 }
 

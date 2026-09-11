@@ -271,6 +271,10 @@ func TestRestoreValidatesAssignments(t *testing.T) {
 		{"duplicate client", func(s *persistedState) { s.Leases[1].ClientID = valid.ClientID }},
 		{"duplicate address", func(s *persistedState) { s.Leases[1].IP = valid.IP }},
 		{"duplicate hostname", func(s *persistedState) { s.Leases[1].Hostname = valid.Hostname }},
+		{"duplicate legacy gateway hostname", func(s *persistedState) {
+			s.Leases[0].Hostname = "gateway.home.arpa."
+			s.Leases[1].Hostname = "gateway.home.arpa."
+		}},
 		{"active quarantine", func(s *persistedState) {
 			s.Declined = []declinedAddress{{IP: valid.IP, ExpiresAt: valid.ExpiresAt}}
 		}},
@@ -304,5 +308,62 @@ func TestRestoreValidatesAssignments(t *testing.T) {
 				t.Fatal("invalid saved assignment was accepted")
 			}
 		})
+	}
+}
+
+func TestRestoreMigratesLegacyGatewayLease(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+	cfg.File = filepath.Join(t.TempDir(), "leases.json")
+	current := Lease{
+		ClientID:  "old-gateway-client",
+		IP:        cfg.PoolStart,
+		Hostname:  "gateway.home.arpa.",
+		ExpiresAt: time.Date(2030, time.January, 1, 13, 0, 0, 0, time.UTC),
+	}
+	data, err := json.Marshal(persistedState{Version: 1, Leases: []Lease{current}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.File, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := current.ExpiresAt.Add(-time.Hour)
+	m, err := newManager(cfg, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("legacy gateway lease prevented startup: %v", err)
+	}
+	want := current
+	want.Hostname = ""
+	if got, ok := m.LookupIP(current.IP); !ok || got != want {
+		t.Fatalf("legacy gateway migration changed allocation: %+v, %v; want %+v", got, ok, want)
+	}
+	if _, ok := m.LookupName("GATEWAY.HOME.ARPA."); ok {
+		t.Fatal("legacy gateway hostname remained registered")
+	}
+	if _, err := m.Commit("other", current.IP, "other"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("migration freed an active client's address: %v", err)
+	}
+	renewed, err := m.Commit(current.ClientID, current.IP, "")
+	if err != nil || renewed != want {
+		t.Fatalf("renewal restored reserved hostname: %+v, %v", renewed, err)
+	}
+	restarted, err := newManager(cfg, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := restarted.LookupIP(current.IP); !ok || got != want {
+		t.Fatalf("migrated lease was not persisted: %+v, %v", got, ok)
+	}
+	now = current.ExpiresAt
+	if _, ok := restarted.LookupIP(current.IP); ok {
+		t.Fatal("migrated lease outlived its original expiration")
+	}
+	expired, err := newManager(cfg, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := expired.LookupIP(current.IP); ok {
+		t.Fatal("expired migrated lease was restored")
 	}
 }

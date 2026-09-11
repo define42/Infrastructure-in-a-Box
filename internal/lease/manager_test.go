@@ -232,6 +232,10 @@ func TestCommitSuppressesConflictingInvalidAndReservedNames(t *testing.T) {
 		{"invalid label", "bad_name"},
 		{"outside domain", "attacker.example.org"},
 		{"reserved nameserver", "NS.HOME.ARPA."},
+		{"reserved gateway label", "gateway"},
+		{"reserved gateway case insensitive", "GaTeWaY"},
+		{"reserved gateway qualified", "gateway.home.arpa"},
+		{"reserved gateway FQDN", "GATEWAY.HOME.ARPA."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -277,6 +281,36 @@ func TestCommitRejectsInvalidClientAndAddress(t *testing.T) {
 				t.Fatalf("invalid request error = %v, want ErrUnavailable", err)
 			}
 		})
+	}
+}
+
+func TestCommitSuppressesReservedOfferHostname(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+	cfg.Domain = " HOME.ARPA. "
+	m, now := testManager(t, cfg)
+	offer, err := m.Offer("client", cfg.PoolStart, "GaTeWaY.HoMe.ArPa.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := m.Commit("client", offer.IP, "")
+	if err != nil || current.IP != offer.IP || current.Hostname != "" {
+		t.Fatalf("reserved offer must grant an unnamed lease: %+v, %v", current, err)
+	}
+	if _, ok := m.LookupName("gateway"); ok {
+		t.Fatal("reserved offered hostname was registered")
+	}
+	renewed, err := m.Commit("client", current.IP, "")
+	if err != nil || renewed.Hostname != "" {
+		t.Fatalf("renewal restored reserved hostname: %+v, %v", renewed, err)
+	}
+	*now = renewed.ExpiresAt
+	if _, ok := m.LookupIP(current.IP); ok {
+		t.Fatal("unnamed reserved-host lease did not expire")
+	}
+	replacement, err := m.Commit("replacement", current.IP, "gateway")
+	if err != nil || replacement.Hostname != "" {
+		t.Fatalf("expiry made reserved name available: %+v, %v", replacement, err)
 	}
 }
 

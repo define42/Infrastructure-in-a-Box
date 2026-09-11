@@ -71,11 +71,16 @@ func (m *Manager) restore() error {
 		if current.Hostname != "" && names[current.Hostname] {
 			return fmt.Errorf("lease file has duplicate hostname %q", current.Hostname)
 		}
-		m.state.leases[current.ClientID] = current
 		addresses[current.IP] = true
 		if current.Hostname != "" {
 			names[current.Hostname] = true
 		}
+		if current.Hostname == "gateway."+m.cfg.Domain+"." {
+			// Older versions allowed this hostname. Preserve the client's lease
+			// while reserving gateway DNS for the built-in HTTPS server.
+			current.Hostname = ""
+		}
+		m.state.leases[current.ClientID] = current
 	}
 	for _, declined := range saved.Declined {
 		if !m.inPool(declined.IP) || declined.ExpiresAt.IsZero() {

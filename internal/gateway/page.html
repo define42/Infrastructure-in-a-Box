@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Hostname}} · Infrastructure in a Box</title>
+  <style>
+    :root { color-scheme: light; --ink: #17252b; --muted: #485960; --accent: #145c52; --paper: #fff; --line: #d5dfdd; --background: #f3f6f5; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--background); color: var(--ink); font: 1rem/1.6 system-ui, sans-serif; }
+    main { max-width: 48rem; margin: 8vh auto; padding: 2rem; }
+    .brand { margin: 0 0 2rem; color: var(--muted); font-size: .875rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+    h1 { margin: 0 0 .75rem; font-size: clamp(1.75rem, 5vw, 2.5rem); line-height: 1.2; letter-spacing: -.03em; overflow-wrap: anywhere; }
+    h2 { margin: 0 0 .75rem; font-size: 1.25rem; }
+    p { margin: .75rem 0; }
+    .intro { color: var(--muted); max-width: 38rem; }
+    section { margin: 2rem 0; padding: 1.5rem; border: 1px solid var(--line); border-radius: .75rem; background: var(--paper); }
+    .downloads { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1.25rem; }
+    a { display: inline-flex; align-items: center; min-height: 44px; padding: .625rem 1rem; border: 1px solid var(--accent); border-radius: .375rem; color: var(--accent); font-weight: 600; text-decoration: none; }
+    a.primary { color: var(--paper); background: var(--accent); }
+    a:hover { text-decoration: underline; text-underline-offset: .2em; }
+    a:focus-visible { outline: 3px solid var(--ink); outline-offset: 4px; }
+    code { display: block; padding: 1rem; border-radius: .375rem; background: var(--background); font: .875rem/1.8 ui-monospace, monospace; overflow-wrap: anywhere; }
+    .note { color: var(--muted); font-size: .9375rem; }
+    ol { padding-left: 1.5rem; }
+    li + li { margin-top: .625rem; }
+    @media (max-width: 480px) { main { margin: 1rem auto; padding: 1.25rem; } section { padding: 1.25rem; } }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="brand">Infrastructure in a Box</p>
+    <h1>{{.Hostname}}</h1>
+    <p class="intro">Your private network gateway. Download this network’s public root certificate to trust its HTTPS connection on your devices.</p>
+    <section aria-labelledby="download-heading">
+      <h2 id="download-heading">Root CA certificate</h2>
+      <p>Choose the certificate format your device supports. Both downloads contain the same public certificate.</p>
+      <div class="downloads">
+        <a class="primary" href="/ca.pem" download="root-ca.pem">Download PEM</a>
+        <a href="/ca.crt" download="root-ca.crt">Download CRT (DER)</a>
+      </div>
+    </section>
+    <section aria-labelledby="trust-heading">
+      <h2 id="trust-heading">Connect with trust</h2>
+      <ol>
+        <li>Download the certificate and compare its SHA-256 fingerprint with the copy provided by your network administrator or on the gateway host.</li>
+        <li>Import it into your device’s trusted root certificate authorities. Some browsers use a separate certificate store.</li>
+        <li>Reopen this gateway using the hostname above. Once the root is trusted, your browser can verify the HTTPS certificate.</li>
+      </ol>
+      <p class="note">Trusting this root allows it to authenticate certificates it signs. Verify the fingerprint through a trusted source before installing it; this page alone cannot establish initial trust.</p>
+      <p><strong>SHA-256 fingerprint</strong></p>
+      <code>{{.Fingerprint}}</code>
+    </section>
+  </main>
+</body>
+</html>

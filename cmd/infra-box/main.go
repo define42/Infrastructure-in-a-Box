@@ -15,7 +15,9 @@ import (
 	"github.com/define42/Infrastructure-in-a-Box/internal/config"
 	"github.com/define42/Infrastructure-in-a-Box/internal/dhcpserver"
 	"github.com/define42/Infrastructure-in-a-Box/internal/dnsserver"
+	"github.com/define42/Infrastructure-in-a-Box/internal/gateway"
 	"github.com/define42/Infrastructure-in-a-Box/internal/lease"
+	"github.com/define42/Infrastructure-in-a-Box/internal/pki"
 )
 
 func main() {
@@ -58,12 +60,24 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	ca, err := pki.Open(pki.Config{
+		Directory: cfg.CADirectory, Domain: cfg.Domain, ServerIP: cfg.ServerIP,
+	})
+	if err != nil {
+		return fmt.Errorf("initialize private CA: %w", err)
+	}
+	https, err := gateway.New(gateway.Config{
+		Address: cfg.HTTPSAddress, Domain: cfg.Domain,
+	}, ca.RootPEM(), ca.GetCertificate, logger)
+	if err != nil {
+		return fmt.Errorf("initialize HTTPS gateway: %w", err)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return serve(ctx, dhcp.Run, dns.Run)
+	return serve(ctx, dhcp.Run, dns.Run, https.Run)
 }
 
-// serve waits for both services and cancels the sibling on any service exit.
+// serve waits for all services and cancels the others on any service exit.
 func serve(ctx context.Context, runners ...func(context.Context) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

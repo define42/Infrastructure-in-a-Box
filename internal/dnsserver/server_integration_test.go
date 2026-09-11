@@ -126,10 +126,20 @@ func TestForwardingIntegration(t *testing.T) {
 	if udpQueries.Load() != 4 || tcpQueries.Load() != 1 {
 		t.Fatalf("upstream counts: UDP=%d TCP=%d; want 4 and 1", udpQueries.Load(), tcpQueries.Load())
 	}
-	for _, name := range []string{"missing.home.arpa.", "100.1.168.192.in-addr.arpa.", "ns.home.arpa."} {
+	for _, name := range []string{
+		"missing.home.arpa.", "100.1.168.192.in-addr.arpa.", "ns.home.arpa.", "gateway.home.arpa.",
+	} {
 		if _, _, err := client.Exchange(new(dns.Msg).SetQuestion(name, dns.TypeA), address); err != nil {
 			t.Fatal(err)
 		}
+	}
+	gatewayQuery := new(dns.Msg).SetQuestion("gateway.home.arpa.", dns.TypeAAAA)
+	gatewayResponse, _, err := client.Exchange(gatewayQuery, address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gatewayResponse.Rcode != dns.RcodeSuccess || !gatewayResponse.Authoritative || len(gatewayResponse.Answer) != 0 {
+		t.Fatalf("gateway AAAA did not return authoritative NODATA: %s", gatewayResponse)
 	}
 	query := new(dns.Msg).SetQuestion("www.example.", dns.TypeA)
 	query.RecursionDesired = false
@@ -301,6 +311,8 @@ func TestDHCPDNSLifecycleIntegration(t *testing.T) {
 			t.Fatalf("unexpected answer: %v", answer)
 		}
 	}
+	checkDNS("gateway.home.arpa.", dns.TypeA, dns.RcodeSuccess, config.ServerIP.String())
+	checkDNS("gateway.home.arpa.", dns.TypeAAAA, dns.RcodeSuccess, "")
 	offer := dhcpRequest(dhcpv4.MessageTypeDiscover, dhcpv4.WithOption(dhcpv4.OptHostName("Laptop")))
 	if offer == nil || offer.MessageType() != dhcpv4.MessageTypeOffer {
 		t.Fatalf("expected DHCP OFFER, got %v", offer)
@@ -328,12 +340,22 @@ func TestDHCPDNSLifecycleIntegration(t *testing.T) {
 	checkDNS("laptop.home.arpa.", dns.TypeA, dns.RcodeNameError, "")
 	checkDNS("desktop.home.arpa.", dns.TypeA, dns.RcodeSuccess, ack.YourIPAddr.String())
 	checkDNS(reverse, dns.TypePTR, dns.RcodeSuccess, "desktop.home.arpa.")
+	reserved := dhcpRequest(dhcpv4.MessageTypeRequest,
+		dhcpv4.WithClientIP(ack.YourIPAddr), dhcpv4.WithOption(dhcpv4.OptHostName("GATEWAY.HOME.ARPA.")),
+	)
+	if reserved == nil || reserved.MessageType() != dhcpv4.MessageTypeAck {
+		t.Fatalf("reserved hostname prevented DHCP renewal: %v", reserved)
+	}
+	checkDNS("gateway.home.arpa.", dns.TypeA, dns.RcodeSuccess, config.ServerIP.String())
+	checkDNS("desktop.home.arpa.", dns.TypeA, dns.RcodeNameError, "")
+	checkDNS(reverse, dns.TypePTR, dns.RcodeNameError, "")
 	if reply := dhcpRequest(dhcpv4.MessageTypeRelease, dhcpv4.WithClientIP(ack.YourIPAddr),
 		dhcpv4.WithOption(dhcpv4.OptServerIdentifier(ack.ServerIdentifier()))); reply != nil {
 		t.Fatalf("unexpected RELEASE response: %v", reply)
 	}
 	checkDNS("desktop.home.arpa.", dns.TypeA, dns.RcodeNameError, "")
 	checkDNS(reverse, dns.TypePTR, dns.RcodeNameError, "")
+	checkDNS("gateway.home.arpa.", dns.TypeA, dns.RcodeSuccess, config.ServerIP.String())
 }
 
 func listenPair(t *testing.T) (net.Listener, net.PacketConn) {
