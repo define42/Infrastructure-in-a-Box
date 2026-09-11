@@ -6,6 +6,7 @@ import (
 	"flag"
 	"io"
 	"net/netip"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,7 @@ func TestParseDefaults(t *testing.T) {
 		DNSTTL:        time.Minute,
 		HTTPSAddress:  "192.168.50.2:443",
 		CADirectory:   "pki",
+		ACMEStateFile: filepath.Join("pki", "acme.json"),
 	}
 	if cfg != expected {
 		t.Errorf("Parse() = %+v, want %+v", cfg, expected)
@@ -68,6 +70,44 @@ func TestParseOverrides(t *testing.T) {
 	}
 	if cfg.HTTPSAddress != ":8443" || cfg.CADirectory != "/var/lib/infra-box/pki" {
 		t.Errorf("incorrect HTTPS/CA settings: %+v", cfg)
+	}
+	if cfg.ACMEStateFile != "/var/lib/infra-box/pki/acme.json" {
+		t.Errorf("ACME default did not follow custom CA directory: %q", cfg.ACMEStateFile)
+	}
+}
+
+func TestParseACMEStateOverride(t *testing.T) {
+	t.Parallel()
+	cfg, err := config.Parse(append(validArgs(), "-acme-state", "/var/lib/infra-box/acme.json"), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ACMEStateFile != "/var/lib/infra-box/acme.json" {
+		t.Errorf("ACME state file = %q", cfg.ACMEStateFile)
+	}
+}
+
+func TestParseRejectsACMEStateCollisions(t *testing.T) {
+	t.Parallel()
+	leasePath, err := filepath.Abs("leases.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		"leases.json", leasePath, "./pki/../leases.json", "pki",
+		"pki/root-ca-bundle.pem", "pki/gateway-bundle.pem", "pki/root-ca.pem",
+	} {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+			_, err := config.Parse(append(validArgs(), "-acme-state", path), io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "-acme-state must differ") {
+				t.Fatalf("Parse error = %v, want ACME state collision", err)
+			}
+		})
+	}
+	_, err = config.Parse(append(validArgs(), "-lease-file", "pki/acme.json"), io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "-acme-state must differ") {
+		t.Fatalf("default ACME state collision error = %v", err)
 	}
 }
 
@@ -332,6 +372,11 @@ func TestParseRejectsInvalidConfiguration(t *testing.T) {
 			name: "blank CA directory",
 			args: []string{"-ca-dir", " "},
 			want: "persistent directory",
+		},
+		{
+			name: "blank ACME state file",
+			args: []string{"-acme-state", " "},
+			want: "persistent file",
 		},
 		{
 			name: "zero dns port",

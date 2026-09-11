@@ -30,9 +30,12 @@ var pageHTML string
 type Config struct {
 	Address string
 	Domain  string
+	// ACMEHandler optionally serves /acme/ requests, including signed POSTs.
+	// The handler must support concurrent requests.
+	ACMEHandler http.Handler
 }
 
-// Server serves immutable public certificate downloads and a gateway landing page.
+// Server serves the HTTPS gateway, public root downloads, and optional ACME API.
 type Server struct {
 	config         Config
 	hostname       string
@@ -187,7 +190,8 @@ func (s *Server) serve(ctx context.Context, listener net.Listener) error {
 	return nil
 }
 
-// ServeHTTP serves only public, in-memory content; it never opens a file.
+// ServeHTTP routes ACME requests to the configured handler and serves immutable
+// public certificate downloads and the gateway page for GET and HEAD requests.
 func (s *Server) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -195,6 +199,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 	w.Header().Set("Cache-Control", "no-store")
+	if s.config.ACMEHandler != nil && strings.HasPrefix(request.URL.Path, "/acme/") {
+		s.config.ACMEHandler.ServeHTTP(w, request)
+		return
+	}
 	if request.Method != http.MethodGet && request.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		s.write(w, request, http.StatusMethodNotAllowed, "text/plain; charset=utf-8", []byte("method not allowed\n"))

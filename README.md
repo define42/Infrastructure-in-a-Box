@@ -5,6 +5,7 @@ HTTPS gateway. Clients receive an IPv4 lease and the server's DNS address;
 their DHCP hostnames become local A and PTR records. `gateway.<domain>` serves
 HTTPS using a certificate signed by the private CA and offers its public root
 certificate for download.
+An ACME v2 server issues certificates for active DHCP hostnames using HTTP-01.
 DHCP packet handling uses `github.com/insomniacslk/dhcp/dhcpv4`, and DNS uses
 `github.com/miekg/dns`.
 
@@ -122,6 +123,81 @@ not the private bundles. Certificates and keys are replaced as atomic bundles;
 invalid or incomplete private state causes startup to fail rather than creating
 an unrelated CA. Only one server process may own a CA directory.
 
+## ACME certificates with HTTP-01
+
+The ACME directory is `https://gateway.home.arpa/acme/directory`, using the
+configured domain and HTTPS port. With `-https-listen :8443`, use
+`https://gateway.home.arpa:8443/acme/directory`. The API shares the gateway's
+HTTPS listener and signs certificates under the existing private CA.
+
+An ACME client generates and retains its own account and certificate private
+keys. It requests a certificate for its fully qualified DHCP hostname, such as
+`laptop.home.arpa`, and serves the challenge response at
+`http://laptop.home.arpa/.well-known/acme-challenge/<token>`. The CA connects to
+the client's current leased IPv4 address on **TCP port 80**. Permit that
+connection from the infrastructure server and keep the challenge path available
+for renewal. Port 80 belongs to the requesting client's HTTP listener; the ACME
+API continues to use HTTPS on the gateway.
+
+Only active, committed DHCP registrations beneath `-domain` can obtain
+certificates. The zone apex, reserved `gateway` and `ns` names, wildcard names,
+IP identifiers, external names, and names known only to an upstream resolver
+are rejected. Validation connects directly to the checked lease address within
+`-subnet`; it does not use system DNS, upstream DNS, or HTTP proxies. The
+challenge must return HTTP 200 directly: redirects are rejected. Validation
+has a five-second timeout and rechecks the lease owner and address before
+accepting the result. Every new order requires fresh authorization.
+
+After securely obtaining the public root as described above, a
+[Certbot standalone client](https://eff-certbot.readthedocs.io/en/stable/using.html#standalone)
+can request a certificate on the DHCP client. Replace the hostname, contact
+email, and local public root path in this example:
+
+```sh
+sudo env REQUESTS_CA_BUNDLE=/etc/infra-box/root-ca.pem \
+  certbot certonly \
+  --server https://gateway.home.arpa/acme/directory \
+  --standalone --preferred-challenges http \
+  --domain laptop.home.arpa \
+  --email you@example.net --agree-tos
+```
+
+Certbot must be able to bind the client's port 80. For an existing HTTP server,
+use its webroot integration and serve the challenge path without redirecting
+it. `REQUESTS_CA_BUNDLE` tells Certbot to verify the gateway against this private
+root; keep it available for renewals as well. These options are documented in
+the [Certbot command reference](https://eff-certbot.readthedocs.io/en/stable/man/certbot.html).
+
+Configure the client's HTTPS service to use the certificate and key saved by
+Certbot, and arrange renewal and service reloads with that client's normal
+renewal mechanism. A manual renewal check uses:
+
+```sh
+sudo env REQUESTS_CA_BUNDLE=/etc/infra-box/root-ca.pem certbot renew
+```
+
+Issued certificates are valid for up to 90 days, capped by root expiry. Client
+devices connecting to those services must also trust the private root. Losing a
+DHCP lease does not revoke an already issued certificate; retain control of
+the hostname or revoke the certificate when retiring a service. DHCP hostnames
+remain client-supplied names, so this CA is intended for a trusted private
+network.
+
+ACME accounts, orders, issued certificates, and revocations are persisted in
+`<ca-dir>/acme.json` by default. Use `-acme-state` to choose another persistent
+file, and back it up together with the CA and lease state. Its permissions are
+`0600`; it contains account public keys, not client private keys. Only one
+server process may own these files. Keep the configured domain and HTTPS origin
+stable so existing clients' account and order URLs continue to work.
+
+Certificates can be revoked using the issuing account, the certificate's private
+key, or an active account with valid HTTP-01 authorizations for every certificate
+hostname that still match the current DHCP leases. Signed revocation lists are available
+at `https://gateway.home.arpa/acme/crl`, also recorded in issued certificates'
+CRL distribution points. Applications must explicitly check the CRL for
+revocation to take effect; there is no OCSP responder. This version supports
+HTTP-01 only, with no DNS-01 or TLS-ALPN-01 challenge support.
+
 ## Configuration
 
 Run `./bin/infra-box -h` for command-line help. Configuration uses flags;
@@ -144,6 +220,7 @@ there is no configuration file or environment-variable layer.
 | `-dns-ttl` | `1m` | Maximum TTL for DNS records, in whole seconds, at least `1s`. |
 | `-https-listen` | `<server-ip>:443` | Gateway HTTPS TCP listener. |
 | `-ca-dir` | `pki` | Persistent directory for the private CA and gateway certificates. |
+| `-acme-state` | `<ca-dir>/acme.json` | Persistent ACME accounts, orders, certificates, and revocations. Must differ from the lease and CA certificate/key files. |
 
 All listeners accept `:port`, `0.0.0.0:port`, or `<server-ip>:port`. Alternate
 ports support development, but normal DHCP clients expect DHCP port 67 and DNS
@@ -200,7 +277,8 @@ go vet ./...
 
 Unit tests exercise lease allocation, DHCP packet handling, DNS answers,
 certificate generation and renewal, public CA downloads, and configuration
-validation. Integration tests use local sockets on unprivileged
+validation, plus ACME signed requests and HTTP-01 validation policy.
+Integration tests use local sockets on unprivileged
 ports, so they can run without root or changing your network configuration.
 HTTPS tests trust only their generated private root and verify the real TLS
 handshake and certificate downloads.

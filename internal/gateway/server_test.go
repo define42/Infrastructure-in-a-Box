@@ -127,6 +127,39 @@ func TestOnlyPublicRoutesAndReadMethods(t *testing.T) {
 	}
 }
 
+func TestACMERoutesPreserveRequests(t *testing.T) {
+	t.Parallel()
+	manager := testPKI(t)
+	var receivedBody, receivedPath, receivedMethod string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		receivedBody, receivedPath, receivedMethod = string(body), r.URL.Path, r.Method
+		w.Header().Set("Replay-Nonce", "test-nonce")
+		w.WriteHeader(http.StatusCreated)
+	})
+	server, err := New(Config{Address: "127.0.0.1:0", Domain: "home.arpa", ACMEHandler: handler},
+		manager.RootPEM(), manager.GetCertificate, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/acme/new-order", strings.NewReader("signed JWS")))
+	if response.Code != http.StatusCreated || response.Header().Get("Replay-Nonce") != "test-nonce" ||
+		receivedBody != "signed JWS" || receivedPath != "/acme/new-order" || receivedMethod != http.MethodPost {
+		t.Fatalf("ACME request not forwarded intact: response=%d method=%q path=%q body=%q", response.Code, receivedMethod, receivedPath, receivedBody)
+	}
+	for _, path := range []string{"/ca.pem", "/acme-other/new-order", "/acme"} {
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, nil))
+		if response.Code != http.StatusMethodNotAllowed {
+			t.Errorf("POST %s escaped gateway method policy: %d", path, response.Code)
+		}
+	}
+}
+
 func TestNewRejectsInvalidConfiguration(t *testing.T) {
 	t.Parallel()
 	manager := testPKI(t)

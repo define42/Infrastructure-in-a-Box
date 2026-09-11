@@ -38,6 +38,8 @@ type Config struct {
 	Directory string
 	Domain    string
 	ServerIP  netip.Addr
+	// CRLURL is the optional public revocation list URL for ACME certificates.
+	CRLURL string
 }
 
 // Manager holds a persistent CA and renews its gateway certificate. Certificate

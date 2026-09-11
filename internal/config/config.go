@@ -10,6 +10,7 @@ import (
 	"math"
 	"net"
 	"net/netip"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +35,7 @@ type Config struct {
 	DNSTTL        time.Duration
 	HTTPSAddress  string
 	CADirectory   string
+	ACMEStateFile string
 }
 
 // Parse validates command-line arguments without opening sockets or inspecting
@@ -133,6 +135,12 @@ func Parse(args []string, output io.Writer) (Config, error) {
 		"pki",
 		"private CA and gateway certificate directory (must persist across restarts)",
 	)
+	flags.StringVar(
+		&cfg.ACMEStateFile,
+		"acme-state",
+		"",
+		"persistent ACME account, order, and revocation state (default <ca-dir>/acme.json)",
+	)
 	if err := flags.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -188,10 +196,45 @@ func Parse(args []string, output io.Writer) (Config, error) {
 	if strings.TrimSpace(cfg.CADirectory) == "" {
 		return Config{}, errors.New("-ca-dir must name a persistent directory")
 	}
+	if cfg.ACMEStateFile == "" {
+		cfg.ACMEStateFile = filepath.Join(cfg.CADirectory, "acme.json")
+	}
+	if err := cfg.validateACMEStatePath(); err != nil {
+		return Config{}, err
+	}
 	if err := cfg.validateListeners(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func (c Config) validateACMEStatePath() error {
+	if strings.TrimSpace(c.ACMEStateFile) == "" {
+		return errors.New("-acme-state must name a persistent file")
+	}
+	statePath, err := filepath.Abs(c.ACMEStateFile)
+	if err != nil {
+		return fmt.Errorf("resolve -acme-state: %w", err)
+	}
+	protectedPaths := []string{
+		c.CADirectory,
+		filepath.Join(c.CADirectory, "root-ca-bundle.pem"),
+		filepath.Join(c.CADirectory, "gateway-bundle.pem"),
+		filepath.Join(c.CADirectory, "root-ca.pem"),
+	}
+	if c.LeaseFile != "" {
+		protectedPaths = append(protectedPaths, c.LeaseFile)
+	}
+	for _, path := range protectedPaths {
+		protected, err := filepath.Abs(path)
+		if err != nil {
+			return fmt.Errorf("resolve persistent path: %w", err)
+		}
+		if statePath == protected {
+			return errors.New("-acme-state must differ from the lease file, CA directory, and CA certificate/key files")
+		}
+	}
+	return nil
 }
 
 func parseIPv4(name, value string) (netip.Addr, error) {

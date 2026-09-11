@@ -10,8 +10,11 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
+	"github.com/define42/Infrastructure-in-a-Box/internal/acmeserver"
+	"github.com/define42/Infrastructure-in-a-Box/internal/acmevalidate"
 	"github.com/define42/Infrastructure-in-a-Box/internal/config"
 	"github.com/define42/Infrastructure-in-a-Box/internal/dhcpserver"
 	"github.com/define42/Infrastructure-in-a-Box/internal/dnsserver"
@@ -60,21 +63,62 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	ca, err := pki.Open(pki.Config{
-		Directory: cfg.CADirectory, Domain: cfg.Domain, ServerIP: cfg.ServerIP,
-	})
+	https, err := newGateway(cfg, leases, logger)
 	if err != nil {
-		return fmt.Errorf("initialize private CA: %w", err)
-	}
-	https, err := gateway.New(gateway.Config{
-		Address: cfg.HTTPSAddress, Domain: cfg.Domain,
-	}, ca.RootPEM(), ca.GetCertificate, logger)
-	if err != nil {
-		return fmt.Errorf("initialize HTTPS gateway: %w", err)
+		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return serve(ctx, dhcp.Run, dns.Run, https.Run)
+}
+
+func newGateway(cfg config.Config, leases *lease.Manager, logger *slog.Logger) (*gateway.Server, error) {
+	baseURL, err := acmeBaseURL(cfg.Domain, cfg.HTTPSAddress)
+	if err != nil {
+		return nil, err
+	}
+	// The CA must initialize its empty directory before ACME creates state there.
+	ca, err := pki.Open(pki.Config{
+		Directory: cfg.CADirectory, Domain: cfg.Domain, ServerIP: cfg.ServerIP,
+		CRLURL: baseURL + "/crl",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("initialize private CA: %w", err)
+	}
+	validator, err := acmevalidate.New(acmevalidate.Config{Domain: cfg.Domain, Subnet: cfg.Subnet}, leases)
+	if err != nil {
+		return nil, fmt.Errorf("initialize ACME validation: %w", err)
+	}
+	acme, err := acmeserver.New(acmeserver.Config{
+		BaseURL: baseURL, Domain: cfg.Domain, StateFile: cfg.ACMEStateFile,
+	}, ca, validator, logger)
+	if err != nil {
+		return nil, fmt.Errorf("initialize ACME server: %w", err)
+	}
+	https, err := gateway.New(gateway.Config{
+		Address: cfg.HTTPSAddress, Domain: cfg.Domain, ACMEHandler: acme,
+	}, ca.RootPEM(), ca.GetCertificate, logger)
+	if err != nil {
+		return nil, fmt.Errorf("initialize HTTPS gateway: %w", err)
+	}
+	logger.Info("ACME HTTP-01 enabled", "directory", baseURL+"/directory", "state", cfg.ACMEStateFile)
+	return https, nil
+}
+
+func acmeBaseURL(domain, address string) (string, error) {
+	_, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", fmt.Errorf("ACME HTTPS listener address: %w", err)
+	}
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil || port == 0 {
+		return "", errors.New("ACME HTTPS listener requires a port between 1 and 65535")
+	}
+	host := "gateway." + domain
+	if port != 443 {
+		host = net.JoinHostPort(host, strconv.FormatUint(port, 10))
+	}
+	return "https://" + host + "/acme", nil
 }
 
 // serve waits for all services and cancels the others on any service exit.
