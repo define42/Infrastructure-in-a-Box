@@ -1,0 +1,18 @@
+{
+  "interface": "eth0",
+  "server_ip": "192.168.50.2",
+  "subnet": "192.168.50.0/24",
+  "pool_start": "192.168.50.100",
+  "pool_end": "192.168.50.200",
+  "router": "192.168.50.1",
+  "domain": "home.arpa",
+  "lease_duration": "12h",
+  "lease_file": "/var/lib/infra-box/leases.json",
+  "dhcp_listen": ":67",
+  "dns_listen": "192.168.50.2:53",
+  "upstream": "",
+  "dns_ttl": "1m",
+  "https_listen": "192.168.50.2:443",
+  "ca_dir": "/var/lib/infra-box/pki",
+  "acme_state": "/var/lib/infra-box/pki/acme.json"
+}

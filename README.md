@@ -19,28 +19,31 @@ go build -o bin/infra-box ./cmd/infra-box
 
 Configure a static IPv4 address on the interface before starting the server. For
 example, with `192.168.50.2/24` already assigned to `eth0`, an existing router at
-`192.168.50.1`, and addresses `.100` through `.200` available for DHCP:
+`192.168.50.1`, and addresses `.100` through `.200` available for DHCP, copy the
+example configuration:
 
 ```sh
-sudo ./bin/infra-box \
-  -interface eth0 \
-  -server-ip 192.168.50.2 \
-  -subnet 192.168.50.0/24 \
-  -pool-start 192.168.50.100 \
-  -pool-end 192.168.50.200 \
-  -router 192.168.50.1 \
-  -domain home.arpa \
-  -lease-file /var/lib/infra-box/leases.json \
-  -ca-dir /var/lib/infra-box/pki
+cp config.example.json config.json
 ```
 
-Create the lease file's parent directory before running that example:
-`sudo install -d -m 0750 /var/lib/infra-box`. Binding the default ports normally
-requires root or suitable operating-system capabilities. Permit client traffic
+Edit `config.json` to match your interface, subnet, pool, router, and state
+locations. The [example file](config.example.json) includes every supported
+setting and stores persistent state under `/var/lib/infra-box`. Create that
+directory, then start the server:
+
+```sh
+sudo install -d -m 0750 /var/lib/infra-box
+sudo ./bin/infra-box -config config.json
+```
+
+The default configuration path is `config.json` in the current directory;
+`-config /etc/infra-box/config.json` selects a different file. The file must
+exist. Binding the default ports normally requires root or suitable
+operating-system capabilities. Permit client traffic
 to UDP port 67, UDP/TCP port 53, and TCP port 443. Only run one DHCP server for
 this pool on the network, and keep statically assigned addresses outside the pool.
 
-The `-router` flag advertises an existing default gateway; the application does
+The `router` setting advertises an existing default gateway; the application does
 not configure interfaces, enable routing, or provide NAT. Omit it if clients
 should not receive a default gateway. The server address and optional router must
 be usable addresses in the subnet, outside the DHCP pool.
@@ -67,8 +70,8 @@ networks; avoid `.local`, which is reserved for
 ## HTTPS gateway and private CA
 
 The server creates its private CA and a signed gateway certificate at first
-startup. For `-domain home.arpa`, visit `https://gateway.home.arpa/`. The built-in
-DNS server always resolves `gateway.home.arpa` to `-server-ip`, independently of
+startup. For `"domain": "home.arpa"`, visit `https://gateway.home.arpa/`. The built-in
+DNS server always resolves `gateway.home.arpa` to `server_ip`, independently of
 DHCP leases. The certificate covers both `gateway.home.arpa` and the server IP,
 so `https://192.168.50.2/` also works after the root has been trusted.
 
@@ -83,7 +86,7 @@ The private CA is initially unknown to clients, so a browser will report an
 untrusted issuer until its root certificate has been installed in the client's
 trusted root store. For the first connection, obtain the public `root-ca.pem`
 file from the server through a trusted administrator channel. Its location is
-`<ca-dir>/root-ca.pem`. The gateway serves only this public certificate; it never
+`<ca_dir>/root-ca.pem`. The gateway serves only this public certificate; it never
 serves private keys or exposes the CA directory as a file server.
 
 On the server, check the fingerprint against the HTTPS startup log:
@@ -105,7 +108,7 @@ openssl x509 -inform DER -in root-ca.crt -noout -fingerprint -sha256
 
 Install the public root in the operating system or browser's trusted root store
 to enable normal HTTPS access. The application does not change client trust
-stores automatically. If `-https-listen` uses another port, include that port in
+stores automatically. If `https_listen` uses another port, include that port in
 the gateway URL and in `curl --resolve`.
 
 The CA uses ECDSA P-256 and is valid for ten years. Gateway certificates last up
@@ -126,7 +129,7 @@ an unrelated CA. Only one server process may own a CA directory.
 ## ACME certificates with HTTP-01
 
 The ACME directory is `https://gateway.home.arpa/acme/directory`, using the
-configured domain and HTTPS port. With `-https-listen :8443`, use
+configured domain and HTTPS port. With `"https_listen": ":8443"`, use
 `https://gateway.home.arpa:8443/acme/directory`. The API shares the gateway's
 HTTPS listener and signs certificates under the existing private CA.
 
@@ -139,11 +142,11 @@ connection from the infrastructure server and keep the challenge path available
 for renewal. Port 80 belongs to the requesting client's HTTP listener; the ACME
 API continues to use HTTPS on the gateway.
 
-Only active, committed DHCP registrations beneath `-domain` can obtain
+Only active, committed DHCP registrations beneath `domain` can obtain
 certificates. The zone apex, reserved `gateway` and `ns` names, wildcard names,
 IP identifiers, external names, and names known only to an upstream resolver
 are rejected. Validation connects directly to the checked lease address within
-`-subnet`; it does not use system DNS, upstream DNS, or HTTP proxies. The
+`subnet`; it does not use system DNS, upstream DNS, or HTTP proxies. The
 challenge must return HTTP 200 directly: redirects are rejected. Validation
 has a five-second timeout and rechecks the lease owner and address before
 accepting the result. Every new order requires fresh authorization.
@@ -184,7 +187,7 @@ remain client-supplied names, so this CA is intended for a trusted private
 network.
 
 ACME accounts, orders, issued certificates, and revocations are persisted in
-`<ca-dir>/acme.json` by default. Use `-acme-state` to choose another persistent
+`<ca_dir>/acme.json` by default. Set `acme_state` to choose another persistent
 file, and back it up together with the CA and lease state. Its permissions are
 `0600`; it contains account public keys, not client private keys. Only one
 server process may own these files. Keep the configured domain and HTTPS origin
@@ -200,36 +203,63 @@ HTTP-01 only, with no DNS-01 or TLS-ALPN-01 challenge support.
 
 ## Configuration
 
-Run `./bin/infra-box -h` for command-line help. Configuration uses flags;
-there is no configuration file or environment-variable layer.
+All service settings come from a single JSON file. Use `-config` to select the
+file, or omit it to read `config.json` from the current directory. Run
+`./bin/infra-box -h` for command-line help. Service flags and environment-variable
+overrides are not supported. The file is read and validated at startup; restart
+the server after editing it.
 
-| Flag | Default | Meaning |
+The file must contain one JSON object using the exact, lowercase keys below.
+All values are strings, including durations and listener addresses. Omitted
+optional settings use their defaults. Unknown or duplicate keys, `null`, values
+of other types, comments, trailing commas, and additional JSON values are
+rejected. The maximum file size is 1 MiB.
+
+| JSON key | Default when omitted | Meaning |
 | --- | --- | --- |
-| `-interface` | required | Interface serving DHCP. |
-| `-server-ip` | required | Static IPv4 address of this server, also advertised as the DNS server. |
-| `-subnet` | required | Canonical IPv4 CIDR subnet, such as `192.168.50.0/24`. |
-| `-pool-start` | required | First address in the DHCP pool. |
-| `-pool-end` | required | Last address in the DHCP pool, inclusive. |
-| `-router` | empty | Existing default gateway to advertise. |
-| `-domain` | `home.arpa` | Domain for DHCP hostnames. |
-| `-lease-duration` | `12h` | Lease lifetime, in whole seconds, at least `1m`. |
-| `-lease-file` | `leases.json` | Persisted lease state; use `-lease-file ''` for memory only. |
-| `-dhcp-listen` | `:67` | DHCP UDP listener. |
-| `-dns-listen` | `<server-ip>:53` | DNS UDP and TCP listener. |
-| `-upstream` | empty | Optional numeric IPv4 address and port for external DNS, such as `1.1.1.1:53`. |
-| `-dns-ttl` | `1m` | Maximum TTL for DNS records, in whole seconds, at least `1s`. |
-| `-https-listen` | `<server-ip>:443` | Gateway HTTPS TCP listener. |
-| `-ca-dir` | `pki` | Persistent directory for the private CA and gateway certificates. |
-| `-acme-state` | `<ca-dir>/acme.json` | Persistent ACME accounts, orders, certificates, and revocations. Must differ from the lease and CA certificate/key files. |
+| `interface` | required | Interface serving DHCP. |
+| `server_ip` | required | Static IPv4 address of this server, also advertised as the DNS server. |
+| `subnet` | required | Canonical IPv4 CIDR subnet, such as `192.168.50.0/24`. |
+| `pool_start` | required | First address in the DHCP pool. |
+| `pool_end` | required | Last address in the DHCP pool, inclusive. |
+| `router` | `""` | Existing default gateway to advertise; empty disables advertising a router. |
+| `domain` | `home.arpa` | Domain for DHCP hostnames. |
+| `lease_duration` | `12h` | Lease lifetime, in whole seconds, at least `1m`. |
+| `lease_file` | `leases.json` | Persisted lease state; set to `""` for memory only. |
+| `dhcp_listen` | `:67` | DHCP UDP listener. |
+| `dns_listen` | `<server_ip>:53` | DNS UDP and TCP listener; empty also selects this default. |
+| `upstream` | `""` | Optional numeric IPv4 address and port for external DNS, such as `1.1.1.1:53`; empty disables forwarding. |
+| `dns_ttl` | `1m` | Maximum TTL for DNS records, in whole seconds, at least `1s`. |
+| `https_listen` | `<server_ip>:443` | Gateway HTTPS TCP listener; empty also selects this default. |
+| `ca_dir` | `pki` | Persistent directory for the private CA and gateway certificates. |
+| `acme_state` | `<ca_dir>/acme.json` | Persistent ACME accounts, orders, certificates, and revocations; empty also selects this default. Must differ from the lease and CA certificate/key files. |
 
-All listeners accept `:port`, `0.0.0.0:port`, or `<server-ip>:port`. Alternate
+Durations use Go duration strings such as `"12h"`, `"30m"`, or `"60s"` and must
+represent a whole number of seconds. File and directory paths are resolved
+relative to the configuration file's directory, including default paths.
+Absolute paths remain unchanged. For example, a file at
+`/etc/infra-box/config.json` with `"ca_dir": "pki"` stores the CA in
+`/etc/infra-box/pki`; an omitted `acme_state` then becomes
+`/etc/infra-box/pki/acme.json`. An explicit relative `acme_state` is relative to
+the configuration file, not to `ca_dir`. Paths do not expand `~` or environment
+variables.
+
+To migrate an existing launch command, move each service flag into the JSON
+object, remove its leading hyphen, and replace hyphens in its name with
+underscores. For example, `-server-ip 192.168.50.2` becomes
+`"server_ip": "192.168.50.2"`. Replace the service flags in the launch command
+with `-config /path/to/config.json`. Keep existing state paths absolute, or
+adjust relative paths for the configuration file's location, so the server
+continues using the same leases, CA, and ACME state.
+
+All listeners accept `:port`, `0.0.0.0:port`, or `<server_ip>:port`. Alternate
 ports support development, but normal DHCP clients expect DHCP port 67 and DNS
 port 53; DHCP cannot advertise an alternate DNS port. Hostname-based upstream
 addresses are rejected to avoid depending on DNS during startup. An upstream
 must not point back to the DNS listener.
 
 By default, DNS serves local names only. To resolve public names as well, add
-`-upstream 1.1.1.1:53` or the address of your existing resolver. Local names are
+`"upstream": "1.1.1.1:53"` or the address of your existing resolver. Local names are
 answered from lease state and never forwarded. Restrict access to the DNS ports
 to the network you intend to serve, particularly when forwarding is enabled.
 
