@@ -1,64 +1,216 @@
 # Infrastructure-in-a-Box
 
-A Go DHCPv4 server with built-in DNS, a private certificate authority, an
-HTTPS gateway, and LDAP authentication. Clients receive an IPv4 lease and the
-server's DNS address; their DHCP hostnames become local A and PTR records. `gateway.<domain>` serves
-HTTPS using a certificate signed by the private CA and offers its public root
-certificate for download.
-An ACME v2 server issues certificates for active DHCP hostnames using HTTP-01.
-DHCP packet handling uses `github.com/insomniacslk/dhcp/dhcpv4`, and DNS uses
-`github.com/miekg/dns`.
-Static DNS A records, including wildcard records, can also be configured for
-services and devices or to override selected external DNS names.
+Infrastructure-in-a-Box is a single Go application that provides the core
+services for a private IPv4 network: automatic IP addresses, local DNS names,
+HTTPS certificates, and a directory of users and groups. It brings DHCP, DNS,
+a private certificate authority, ACME, and LDAP together in one process,
+configured through one JSON file.
 
-## Build and run
+[![Go version](https://img.shields.io/badge/Go-1.26%2B-00ADD8)](go.mod)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-Use the Go version declared in `go.mod` or newer:
+Use it for a home network or lab where devices and applications need to find
+one another by name, use certificates from a shared private CA, and authenticate
+users through LDAP.
+
+| Service | What it provides |
+| --- | --- |
+| DHCPv4 | IPv4 leases from one address pool, with DNS and optional router settings sent to clients. |
+| DNS | Local names and reverse lookups for active DHCP leases, static and wildcard A records, and optional forwarding to an upstream resolver. |
+| Private CA and ACME | Certificates for active DHCP hostnames through ACME HTTP-01, plus certificates for the built-in HTTPS and LDAPS services. |
+| HTTPS gateway | A page for downloading the public root CA and checking its fingerprint, plus the ACME API. |
+| LDAP and LDAPS | Password authentication and a read-only directory of configured users and groups. |
+
+For example, a laptop joining the network can receive `192.168.50.100` and
+register `laptop.home.arpa`. Other devices can resolve that name immediately.
+An ACME client on the laptop can then request a certificate for
+`laptop.home.arpa` by answering an HTTP-01 challenge. Applications can separately
+use `ldap.home.arpa` to authenticate users from the configured directory.
+
+```text
+DHCP lease:       laptop → 192.168.50.100
+Forward DNS:      laptop.home.arpa → 192.168.50.100
+Reverse DNS:      192.168.50.100 → laptop.home.arpa
+ACME directory:   https://gateway.home.arpa/acme/directory
+User directory:   ldaps://ldap.home.arpa:636
+```
+
+This example uses the default `home.arpa` domain; the actual client address
+comes from the configured pool. Certificates become trusted after clients
+install the private root CA. DHCP hostnames are supplied by clients, so
+certificate issuance assumes a trusted private network.
+
+Read on for [getting started](#getting-started), [configuration](#configuration),
+[DHCP and DNS behavior](#lease-and-dns-behavior),
+[static DNS records](#static-dns-a-records),
+[the private CA](#https-gateway-and-private-ca),
+[ACME certificates](#acme-certificates-with-http-01),
+[LDAP users and groups](#ldap-users-and-groups), and
+[contributing](#contributing).
+
+## Getting started
+
+### Prepare the network
+
+Choose an interface with a static IPv4 address and a DHCP pool that excludes
+all statically assigned devices. The server address and optional router must
+be usable addresses in the subnet, outside the pool. Run only one DHCP server
+for this pool on the network.
+
+The examples below assume:
+
+| Setting | Example |
+| --- | --- |
+| Server interface | `eth0`, already configured with `192.168.50.2/24` |
+| Subnet | `192.168.50.0/24` |
+| Available DHCP pool | `192.168.50.100` through `192.168.50.200` |
+| Existing router | `192.168.50.1` |
+| Local domain | `home.arpa` |
+| Persistent state directory | `/var/lib/infra-box` |
+
+The `router` setting advertises your existing default gateway. Configure the
+host's interfaces and routing separately; Infrastructure-in-a-Box does not
+provide routing or NAT. Omit `router` if clients should not receive a default
+gateway.
+
+### Build from source
+
+Use the Go version declared in [go.mod](go.mod) or newer. From a checkout of
+this repository:
 
 ```sh
 go build -o bin/infra-box ./cmd/infra-box
 ```
 
-Configure a static IPv4 address on the interface before starting the server. For
-example, with `192.168.50.2/24` already assigned to `eth0`, an existing router at
-`192.168.50.1`, and addresses `.100` through `.200` available for DHCP, copy the
-example configuration:
+### Configure and start
+
+Copy the [example configuration](config.example.json):
 
 ```sh
 cp config.example.json config.json
+chmod 600 config.json
 ```
 
 Edit `config.json` to match your interface, subnet, pool, router, and state
-locations. The [example file](config.example.json) includes every supported
-setting and stores persistent state under `/var/lib/infra-box`. Create that
-directory, then start the server:
+locations. The example includes every supported top-level setting and stores
+persistent state under `/var/lib/infra-box`. Its LDAP accounts are disabled
+until you set their password hashes and enable them.
+
+External DNS forwarding is disabled in the example. To resolve public names,
+set `upstream` to your existing resolver's numeric IPv4 address and port, such
+as `"1.1.1.1:53"`. See [configuration](#configuration) for all settings.
+
+Create the state directory, then start the server:
 
 ```sh
 sudo install -d -m 0750 /var/lib/infra-box
 sudo ./bin/infra-box -config config.json
 ```
 
-The default configuration path is `config.json` in the current directory;
-`-config /etc/infra-box/config.json` selects a different file. The file must
-exist. Binding the default ports normally requires root or suitable
-operating-system capabilities. Permit client traffic
-to UDP port 67, UDP/TCP port 53, and TCP ports 389, 443, and 636. Only run one DHCP server for
-this pool on the network, and keep statically assigned addresses outside the pool.
+The configuration file must exist. Omitting `-config` reads `config.json` from
+the current directory. Binding the default ports normally requires root or
+suitable operating-system capabilities. Permit client traffic to these ports:
 
-The `router` setting advertises an existing default gateway; the application does
-not configure interfaces, enable routing, or provide NAT. Omit it if clients
-should not receive a default gateway. The server address and optional router must
-be usable addresses in the subnet, outside the DHCP pool.
+| Service | Default listener | Transport |
+| --- | --- | --- |
+| DHCP | `:67` on the configured interface | UDP |
+| DNS | `<server_ip>:53` | UDP and TCP |
+| HTTPS gateway and ACME | `<server_ip>:443` | TCP |
+| LDAP | `<server_ip>:389` | Plaintext TCP |
+| LDAPS | `<server_ip>:636` | TLS over TCP |
 
-A client announcing hostname `laptop` gets a record such as
-`laptop.home.arpa. A 192.168.50.100`. After it acquires a lease, verify forward and
-reverse DNS using its actual assigned address:
+All services start together, including both LDAP listeners even when no users
+are configured. DNS, HTTPS, LDAP, and LDAPS ports are fixed. Configuration
+changes take effect after a restart.
+
+### Check a client lease
+
+Connect a DHCP client that announces the hostname `laptop`. After it acquires a
+lease, use its actual assigned address to check forward and reverse DNS:
 
 ```sh
 dig @192.168.50.2 laptop.home.arpa A
 dig @192.168.50.2 -x 192.168.50.100
 dig +tcp @192.168.50.2 laptop.home.arpa A
 ```
+
+For HTTPS and LDAPS, first [obtain and trust the public root
+CA](#https-gateway-and-private-ca). You can then visit
+`https://gateway.home.arpa/`, configure an
+[ACME client](#acme-certificates-with-http-01), or enable
+[LDAP accounts](#ldap-users-and-groups).
+
+## Features and configuration
+
+### Configuration
+
+All service settings come from a single JSON file. Use `-config` to select the
+file, or omit it to read `config.json` from the current directory. Run
+`./bin/infra-box -h` for command-line help. Service flags and environment-variable
+overrides are not supported. The file is read and validated at startup; restart
+the server after editing it.
+
+The file must contain one JSON object using the exact, lowercase keys below.
+Values are strings, including durations and listener addresses, except for
+`a_records`, which maps DNS names to IPv4 strings, and the nested `ldap` object
+described in [LDAP users and groups](#ldap-users-and-groups). Omitted
+optional settings use their defaults. Unknown or duplicate keys, `null`, invalid
+value types, comments, trailing commas, and additional JSON values are rejected.
+The maximum file size is 1 MiB.
+
+| JSON key | Default when omitted | Meaning |
+| --- | --- | --- |
+| `interface` | required | Interface serving DHCP. |
+| `server_ip` | required | Static IPv4 address of this server, also advertised as the DNS server. |
+| `subnet` | required | Canonical IPv4 CIDR subnet, such as `192.168.50.0/24`. |
+| `pool_start` | required | First address in the DHCP pool. |
+| `pool_end` | required | Last address in the DHCP pool, inclusive. |
+| `router` | `""` | Existing default gateway to advertise; empty disables advertising a router. |
+| `domain` | `home.arpa` | Domain for DHCP hostnames. |
+| `lease_duration` | `12h` | Lease lifetime, in whole seconds, at least `1m`. |
+| `lease_file` | `leases.json` | Persisted lease state; set to `""` for memory only. |
+| `dhcp_listen` | `:67` | DHCP UDP listener. |
+| `upstream` | `""` | Optional numeric IPv4 address and port for external DNS, such as `1.1.1.1:53`; empty disables forwarding. |
+| `dns_ttl` | `1m` | Maximum TTL for DNS records, in whole seconds, at least `1s`. |
+| `a_records` | `{}` | Exact or wildcard DNS names mapped to IPv4 address strings, including external-name overrides. |
+| `ca_dir` | `pki` | Persistent directory for the private CA and service certificates. |
+| `acme_state` | `<ca_dir>/acme.json` | Persistent ACME accounts, orders, certificates, and revocations; empty also selects this default. Must differ from the lease and CA certificate/key files. |
+| `ldap` | LDAP on `<server_ip>:389`; LDAPS on `<server_ip>:636` | Directory suffix, users, groups, and search permissions for both always-running listeners. See [LDAP users and groups](#ldap-users-and-groups). |
+
+Durations use Go duration strings such as `"12h"`, `"30m"`, or `"60s"` and must
+represent a whole number of seconds. File and directory paths are resolved
+relative to the configuration file's directory, including default paths.
+Absolute paths remain unchanged. For example, a file at
+`/etc/infra-box/config.json` with `"ca_dir": "pki"` stores the CA in
+`/etc/infra-box/pki`; an omitted `acme_state` then becomes
+`/etc/infra-box/pki/acme.json`. An explicit relative `acme_state` is relative to
+the configuration file, not to `ca_dir`. Paths do not expand `~` or environment
+variables.
+
+To migrate an existing launch command, move each service flag into the JSON
+object, remove its leading hyphen, and replace hyphens in its name with
+underscores. For example, `-server-ip 192.168.50.2` becomes
+`"server_ip": "192.168.50.2"`. Replace the service flags in the launch command
+with `-config /path/to/config.json`. Keep existing state paths absolute, or
+adjust relative paths for the configuration file's location, so the server
+continues using the same leases, CA, and ACME state.
+
+DNS always listens on `<server_ip>:53` for UDP and TCP, and HTTPS always listens
+on `<server_ip>:443`. Remove `dns_listen` and `https_listen` from older
+configuration files; those keys are no longer accepted. The DHCP listener
+accepts `:port`, `0.0.0.0:port`, or `<server_ip>:port`. Alternate DHCP ports
+support development, but normal DHCP clients expect port 67. Hostname-based upstream
+addresses are rejected to avoid depending on DNS during startup. An upstream
+must not point back to the DNS listener.
+
+Without an upstream, DNS answers the local zone and configured A record
+overrides. To resolve other public names, add `"upstream": "1.1.1.1:53"` or the
+address of your existing resolver. Local names and matching overrides are
+answered locally. Unmatched external names are forwarded to the upstream, or
+receive `REFUSED` when no upstream is configured. Restrict access to the DNS
+ports to the network you intend to serve, particularly when forwarding is enabled.
+
+### Lease and DNS behavior
 
 Clients must supply a hostname through DHCP to receive a DNS name. The server
 uses Client FQDN option 81 when present, otherwise Host Name option 12, and honors
@@ -69,7 +221,132 @@ domain option 15 and search-list option 119 so clients can resolve short names.
 networks; avoid `.local`, which is reserved for
 [multicast DNS](https://www.rfc-editor.org/rfc/rfc6762.html).
 
-## HTTPS gateway and private CA
+- A DHCP offer temporarily reserves an address. DNS registration happens only
+  after the lease is acknowledged.
+- Active leases drive both forward A records and reverse PTR records. DNS TTLs
+  are capped by the remaining lease lifetime. Client resolvers may retain a
+  previously cached answer until its TTL expires after a release or rename.
+- Renewals update the lease lifetime. Expired, released, or declined leases lose
+  their DHCP DNS records; a configured wildcard may then answer for the name.
+  Declined addresses are temporarily quarantined from allocation.
+- Hostnames are normalized to lowercase. Clients may supply a single label, such
+  as `laptop`, or a fully qualified name under the configured local domain.
+  Invalid or out-of-domain names, names reserved by exact static A records, the
+  reserved `ns`, `gateway`, and `ldap` names, and duplicate names still receive a DHCP
+  address but no DNS registration. A duplicate cannot replace another client's
+  active record. A hostname supplied only during discovery is retained for the subsequent request; renewals that omit a name
+  retain the previous registration.
+  A persisted lease named `gateway.<domain>` from an older version retains its
+  address and expiry on upgrade, but loses that hostname so it cannot replace
+  the HTTPS gateway's DNS record.
+- Lease state is saved on changes and restored at startup, including DNS names
+  for leases that are still valid. Keep the lease file across restarts to avoid
+  reallocating addresses that clients may still be using. In-memory operation
+  intentionally loses lease state when the process exits. Persistence uses an
+  atomic file replacement; a failed write prevents the corresponding lease
+  change from being acknowledged. Only one process may own a lease file.
+- Interrupt or terminate the process with SIGINT or SIGTERM to stop DHCP, DNS,
+  HTTPS, and LDAP together. A listener failure also stops the other services.
+
+This implementation serves one IPv4 subnet and one address pool. It does not
+provide DHCPv6, static reservations, dynamic DNS UPDATE, DNSSEC validation, or
+automatic ICMP/ARP probing for conflicting addresses. Client hostnames are
+client-supplied labels, not authenticated identities. Configure the pool to
+exclude all other equipment with static addresses.
+
+### Static DNS A records
+
+Add an `a_records` object to the JSON configuration, then restart the server:
+
+```json
+"a_records": {
+  "printer": "192.168.50.10",
+  "nas.home.arpa": "192.168.50.20",
+  "*.apps.home.arpa": "192.168.50.20",
+  "@": "192.168.50.2"
+}
+```
+
+With `"domain": "home.arpa"`, the exact records resolve `printer.home.arpa`,
+`nas.home.arpa`, and `home.arpa`. Single hostnames are relative to the configured
+domain; `@` means the domain itself. Names with multiple labels, such as
+`nas.home.arpa` or `google.com`, are used as written and may be outside the local
+domain. Names are case insensitive, and fully qualified names may end in a dot.
+Duplicate names after normalization and the reserved exact local names
+`ns.home.arpa` and `gateway.home.arpa` are rejected. Each entry maps to one
+unicast IPv4 address.
+
+Static records are served over both UDP and TCP with the configured `dns_ttl`.
+They remain available independently of DHCP lease expiry. Exact static records
+within the local domain take precedence over DHCP registrations. DHCP clients
+attempting to register an exact local static name still receive an address, but
+no DNS name; an existing lease that conflicts with a new exact local static name
+keeps its address and loses that hostname. External entries do not reserve DHCP
+names.
+
+For wildcard records, use `*` or `*.home.arpa` for the zone, or
+`*.apps.home.arpa` for a subdomain. The relative form `*.apps` also becomes
+`*.apps.home.arpa`; `*.google.com` applies to the external name as written.
+Only a complete leftmost `*` label is allowed; partial or
+multiple wildcards such as `app*` or `*.*.home.arpa` are rejected. Wildcards are
+used after infrastructure names, exact static records, and active DHCP names.
+They do not reserve matching DHCP names, so a client can register a name covered
+by a wildcard and receive its own DNS record.
+
+Wildcard matching follows the closest-encloser rules in
+[RFC 4592](https://www.rfc-editor.org/rfc/rfc4592.html#section-3.3.1): missing
+names can match at any depth, but an existing name or intervening parent blocks
+a broader wildcard. Parents implied by child records count as existing names.
+For example, `*.apps.home.arpa` can answer both `shop.apps.home.arpa` and
+`api.dev.apps.home.arpa` while `dev.apps.home.arpa` has no records or children.
+Adding `status.dev.apps.home.arpa` creates that parent and prevents
+`api.dev.apps.home.arpa` from using `*.apps.home.arpa`; add `*.dev.apps.home.arpa`
+to provide a wildcard there. A wildcard never matches its own parent, so
+`*.apps.home.arpa` does not supply an A record for `apps.home.arpa` itself.
+
+To override an external domain and its otherwise unmatched descendants, add
+both exact and wildcard entries:
+
+```json
+"a_records": {
+  "google.com": "192.168.50.20",
+  "*.google.com": "192.168.50.20"
+}
+```
+
+The exact entry answers for `google.com`; the wildcard can answer for
+`www.google.com`. An exact entry alone does not override `www.google.com`, and
+the wildcard alone does not override `google.com`. Other external names continue
+to use the upstream, or receive `REFUSED` when it is unset. Wildcard matching
+uses configured names and their implied parents; it does not query the upstream
+to discover which external names exist. A closer configured ancestor can
+therefore block a broader wildcard, just as in the local example above.
+
+Matching external overrides are handled before forwarding for every query
+type. `A` and `ANY` queries receive the configured A record; `AAAA`, `TXT`, and
+other query types receive a local `NODATA` response (success with no answers),
+rather than data from the upstream.
+
+These entries create A records only. They do not create PTR records or DHCP IP
+reservations. For devices configured with fixed IPs, use addresses outside the
+DHCP pool. Targets may also be reachable IPv4 addresses outside the local subnet.
+ACME authorization still requires an exact, active DHCP registration. A name
+resolved only through a static or wildcard record is not eligible, and wildcard
+certificates are not supported. External overrides do not enable certificate
+issuance outside the configured local domain. Restart after editing `a_records`;
+cached DNS answers may remain until their TTL expires.
+
+Check the local and external examples over both DNS transports:
+
+```sh
+dig @192.168.50.2 printer.home.arpa A
+dig +tcp @192.168.50.2 nas.home.arpa A
+dig @192.168.50.2 shop.apps.home.arpa A
+dig @192.168.50.2 google.com A
+dig +tcp @192.168.50.2 www.google.com A
+```
+
+### HTTPS gateway and private CA
 
 The server creates its private CA and a signed gateway certificate at first
 startup. For `"domain": "home.arpa"`, visit `https://gateway.home.arpa/`. The built-in
@@ -127,7 +404,7 @@ not the private bundles. Certificates and keys are replaced as atomic bundles;
 invalid or incomplete private state causes startup to fail rather than creating
 an unrelated CA. Only one server process may own a CA directory.
 
-## ACME certificates with HTTP-01
+### ACME certificates with HTTP-01
 
 The ACME directory is `https://gateway.home.arpa/acme/directory`, using the
 configured domain and fixed HTTPS port 443. The API shares the gateway's
@@ -202,7 +479,7 @@ CRL distribution points. Applications must explicitly check the CRL for
 revocation to take effect; there is no OCSP responder. This version supports
 HTTP-01 only, with no DNS-01 or TLS-ALPN-01 challenge support.
 
-## LDAP users and groups
+### LDAP users and groups
 
 The LDAPv3 server provides authentication and a read-only directory of users and
 groups stored in the JSON configuration. It always starts both listeners,
@@ -320,203 +597,12 @@ noncritical controls may be ignored. Use `ldaps://` for TLS. All services stop
 together on shutdown or a listener failure, so a restart also interrupts LDAP
 authentication.
 
-## Configuration
+## Contributing
 
-All service settings come from a single JSON file. Use `-config` to select the
-file, or omit it to read `config.json` from the current directory. Run
-`./bin/infra-box -h` for command-line help. Service flags and environment-variable
-overrides are not supported. The file is read and validated at startup; restart
-the server after editing it.
-
-The file must contain one JSON object using the exact, lowercase keys below.
-Values are strings, including durations and listener addresses, except for
-`a_records`, which maps DNS names to IPv4 strings, and the nested `ldap` object
-described above. Omitted
-optional settings use their defaults. Unknown or duplicate keys, `null`, invalid
-value types, comments, trailing commas, and additional JSON values are rejected.
-The maximum file size is 1 MiB.
-
-| JSON key | Default when omitted | Meaning |
-| --- | --- | --- |
-| `interface` | required | Interface serving DHCP. |
-| `server_ip` | required | Static IPv4 address of this server, also advertised as the DNS server. |
-| `subnet` | required | Canonical IPv4 CIDR subnet, such as `192.168.50.0/24`. |
-| `pool_start` | required | First address in the DHCP pool. |
-| `pool_end` | required | Last address in the DHCP pool, inclusive. |
-| `router` | `""` | Existing default gateway to advertise; empty disables advertising a router. |
-| `domain` | `home.arpa` | Domain for DHCP hostnames. |
-| `lease_duration` | `12h` | Lease lifetime, in whole seconds, at least `1m`. |
-| `lease_file` | `leases.json` | Persisted lease state; set to `""` for memory only. |
-| `dhcp_listen` | `:67` | DHCP UDP listener. |
-| `upstream` | `""` | Optional numeric IPv4 address and port for external DNS, such as `1.1.1.1:53`; empty disables forwarding. |
-| `dns_ttl` | `1m` | Maximum TTL for DNS records, in whole seconds, at least `1s`. |
-| `a_records` | `{}` | Exact or wildcard DNS names mapped to IPv4 address strings, including external-name overrides. |
-| `ca_dir` | `pki` | Persistent directory for the private CA and service certificates. |
-| `acme_state` | `<ca_dir>/acme.json` | Persistent ACME accounts, orders, certificates, and revocations; empty also selects this default. Must differ from the lease and CA certificate/key files. |
-| `ldap` | LDAP on `<server_ip>:389`; LDAPS on `<server_ip>:636` | Directory suffix, users, groups, and search permissions for both always-running listeners. See above. |
-
-Durations use Go duration strings such as `"12h"`, `"30m"`, or `"60s"` and must
-represent a whole number of seconds. File and directory paths are resolved
-relative to the configuration file's directory, including default paths.
-Absolute paths remain unchanged. For example, a file at
-`/etc/infra-box/config.json` with `"ca_dir": "pki"` stores the CA in
-`/etc/infra-box/pki`; an omitted `acme_state` then becomes
-`/etc/infra-box/pki/acme.json`. An explicit relative `acme_state` is relative to
-the configuration file, not to `ca_dir`. Paths do not expand `~` or environment
-variables.
-
-To migrate an existing launch command, move each service flag into the JSON
-object, remove its leading hyphen, and replace hyphens in its name with
-underscores. For example, `-server-ip 192.168.50.2` becomes
-`"server_ip": "192.168.50.2"`. Replace the service flags in the launch command
-with `-config /path/to/config.json`. Keep existing state paths absolute, or
-adjust relative paths for the configuration file's location, so the server
-continues using the same leases, CA, and ACME state.
-
-DNS always listens on `<server_ip>:53` for UDP and TCP, and HTTPS always listens
-on `<server_ip>:443`. Remove `dns_listen` and `https_listen` from older
-configuration files; those keys are no longer accepted. The DHCP listener
-accepts `:port`, `0.0.0.0:port`, or `<server_ip>:port`. Alternate DHCP ports
-support development, but normal DHCP clients expect port 67. Hostname-based upstream
-addresses are rejected to avoid depending on DNS during startup. An upstream
-must not point back to the DNS listener.
-
-Without an upstream, DNS answers the local zone and configured A record
-overrides. To resolve other public names, add `"upstream": "1.1.1.1:53"` or the
-address of your existing resolver. Local names and matching overrides are
-answered locally. Unmatched external names are forwarded to the upstream, or
-receive `REFUSED` when no upstream is configured. Restrict access to the DNS
-ports to the network you intend to serve, particularly when forwarding is enabled.
-
-## Static DNS A records
-
-Add an `a_records` object to the JSON configuration, then restart the server:
-
-```json
-"a_records": {
-  "printer": "192.168.50.10",
-  "nas.home.arpa": "192.168.50.20",
-  "*.apps.home.arpa": "192.168.50.20",
-  "@": "192.168.50.2"
-}
-```
-
-With `"domain": "home.arpa"`, the exact records resolve `printer.home.arpa`,
-`nas.home.arpa`, and `home.arpa`. Single hostnames are relative to the configured
-domain; `@` means the domain itself. Names with multiple labels, such as
-`nas.home.arpa` or `google.com`, are used as written and may be outside the local
-domain. Names are case insensitive, and fully qualified names may end in a dot.
-Duplicate names after normalization and the reserved exact local names
-`ns.home.arpa` and `gateway.home.arpa` are rejected. Each entry maps to one
-unicast IPv4 address.
-
-Static records are served over both UDP and TCP with the configured `dns_ttl`.
-They remain available independently of DHCP lease expiry. Exact static records
-within the local domain take precedence over DHCP registrations. DHCP clients
-attempting to register an exact local static name still receive an address, but
-no DNS name; an existing lease that conflicts with a new exact local static name
-keeps its address and loses that hostname. External entries do not reserve DHCP
-names.
-
-For wildcard records, use `*` or `*.home.arpa` for the zone, or
-`*.apps.home.arpa` for a subdomain. The relative form `*.apps` also becomes
-`*.apps.home.arpa`; `*.google.com` applies to the external name as written.
-Only a complete leftmost `*` label is allowed; partial or
-multiple wildcards such as `app*` or `*.*.home.arpa` are rejected. Wildcards are
-used after infrastructure names, exact static records, and active DHCP names.
-They do not reserve matching DHCP names, so a client can register a name covered
-by a wildcard and receive its own DNS record.
-
-Wildcard matching follows the closest-encloser rules in
-[RFC 4592](https://www.rfc-editor.org/rfc/rfc4592.html#section-3.3.1): missing
-names can match at any depth, but an existing name or intervening parent blocks
-a broader wildcard. Parents implied by child records count as existing names.
-For example, `*.apps.home.arpa` can answer both `shop.apps.home.arpa` and
-`api.dev.apps.home.arpa` while `dev.apps.home.arpa` has no records or children.
-Adding `status.dev.apps.home.arpa` creates that parent and prevents
-`api.dev.apps.home.arpa` from using `*.apps.home.arpa`; add `*.dev.apps.home.arpa`
-to provide a wildcard there. A wildcard never matches its own parent, so
-`*.apps.home.arpa` does not supply an A record for `apps.home.arpa` itself.
-
-To override an external domain and its otherwise unmatched descendants, add
-both exact and wildcard entries:
-
-```json
-"a_records": {
-  "google.com": "192.168.50.20",
-  "*.google.com": "192.168.50.20"
-}
-```
-
-The exact entry answers for `google.com`; the wildcard can answer for
-`www.google.com`. An exact entry alone does not override `www.google.com`, and
-the wildcard alone does not override `google.com`. Other external names continue
-to use the upstream, or receive `REFUSED` when it is unset. Wildcard matching
-uses configured names and their implied parents; it does not query the upstream
-to discover which external names exist. A closer configured ancestor can
-therefore block a broader wildcard, just as in the local example above.
-
-Matching external overrides are handled before forwarding for every query
-type. `A` and `ANY` queries receive the configured A record; `AAAA`, `TXT`, and
-other query types receive a local `NODATA` response (success with no answers),
-rather than data from the upstream.
-
-These entries create A records only. They do not create PTR records or DHCP IP
-reservations. For devices configured with fixed IPs, use addresses outside the
-DHCP pool. Targets may also be reachable IPv4 addresses outside the local subnet.
-ACME authorization still requires an exact, active DHCP registration. A name
-resolved only through a static or wildcard record is not eligible, and wildcard
-certificates are not supported. External overrides do not enable certificate
-issuance outside the configured local domain. Restart after editing `a_records`;
-cached DNS answers may remain until their TTL expires.
-
-Check the local and external examples over both DNS transports:
-
-```sh
-dig @192.168.50.2 printer.home.arpa A
-dig +tcp @192.168.50.2 nas.home.arpa A
-dig @192.168.50.2 shop.apps.home.arpa A
-dig @192.168.50.2 google.com A
-dig +tcp @192.168.50.2 www.google.com A
-```
-
-## Lease and DNS behavior
-
-- A DHCP offer temporarily reserves an address. DNS registration happens only
-  after the lease is acknowledged.
-- Active leases drive both forward A records and reverse PTR records. DNS TTLs
-  are capped by the remaining lease lifetime. Client resolvers may retain a
-  previously cached answer until its TTL expires after a release or rename.
-- Renewals update the lease lifetime. Expired, released, or declined leases lose
-  their DHCP DNS records; a configured wildcard may then answer for the name.
-  Declined addresses are temporarily quarantined from allocation.
-- Hostnames are normalized to lowercase. Clients may supply a single label, such
-  as `laptop`, or a fully qualified name under the configured local domain.
-  Invalid or out-of-domain names, names reserved by exact static A records, the
-  reserved `ns` and `gateway` names, and duplicate names still receive a DHCP
-  address but no DNS registration. A
-  duplicate cannot replace another client's active record. A hostname supplied only during
-  discovery is retained for the subsequent request; renewals that omit a name
-  retain the previous registration.
-  A persisted lease named `gateway.<domain>` from an older version retains its
-  address and expiry on upgrade, but loses that hostname so it cannot replace
-  the HTTPS gateway's DNS record.
-- Lease state is saved on changes and restored at startup, including DNS names
-  for leases that are still valid. Keep the lease file across restarts to avoid
-  reallocating addresses that clients may still be using. In-memory operation
-  intentionally loses lease state when the process exits. Persistence uses an
-  atomic file replacement; a failed write prevents the corresponding lease
-  change from being acknowledged. Only one process may own a lease file.
-- Interrupt or terminate the process with SIGINT or SIGTERM to stop DHCP, DNS,
-  HTTPS, and LDAP together. A listener failure also stops the other services.
-
-This implementation serves one IPv4 subnet and one address pool. It does not
-provide DHCPv6, static reservations, dynamic DNS UPDATE, DNSSEC validation, or
-automatic ICMP/ARP probing for conflicting addresses. Client hostnames are
-client-supplied labels, not authenticated identities. Configure the pool to
-exclude all other equipment with static addresses.
-
-## Development
+Build with `make build` and run the checks below before submitting a change.
+For changes to DHCP, DNS, or lease behavior, all three commands are required.
+Network tests must use loopback sockets or in-memory connections without
+serving the host LAN.
 
 ```sh
 go test -race ./...
@@ -525,7 +611,7 @@ go vet ./...
 ```
 
 Unit tests exercise lease allocation, DHCP packet handling, DNS answers,
-certificate generation and renewal, public CA downloads, and configuration
+certificate generation and renewal, public CA downloads, configuration
 validation, LDAP authentication and directory access, plus ACME signed requests
 and HTTP-01 validation policy.
 Integration tests use local sockets on unprivileged
@@ -547,3 +633,7 @@ detection, shuffled order, and test caching disabled. A separate lint job checks
 module consistency, `go vet`, golangci-lint (including integration tests), Go
 formatting, and known vulnerabilities with `govulncheck`. The workflow uses the
 latest Go 1.26 patch release and read-only repository permissions.
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).
