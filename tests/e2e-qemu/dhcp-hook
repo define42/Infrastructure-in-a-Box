@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+trap 'status=$?; [ "$status" -eq 0 ] || echo "E2E FAIL: DHCP hook ($1), status $status"' EXIT
+case "$1" in
+    deconfig)
+        ip addr flush dev "$interface"
+        ;;
+    bound|renew)
+        [ "$ip" = 192.168.77.100 ]
+        [ "$subnet" = 255.255.255.0 ]
+        [ "$dns" = 192.168.77.1 ]
+        [ "$domain" = home.arpa ]
+        [ "$search" = home.arpa ]
+        [ -z "${router:-}" ]
+        ip addr replace "$ip/24" dev "$interface"
+        printf 'nameserver %s\nsearch %s\n' "$dns" "$search" > /etc/resolv.conf
+        touch "/run/$1"
+        ;;
+esac

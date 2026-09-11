@@ -4,3 +4,5 @@
 /coverage.out
 /pki/
 /config.json
+/.cache/
+/artifacts/

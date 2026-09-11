@@ -4,6 +4,7 @@ run:
   timeout: 5m
   build-tags:
     - integration
+    - e2e_guest
 
 linters:
   default: standard

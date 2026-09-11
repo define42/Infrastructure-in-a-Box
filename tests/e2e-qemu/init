@@ -1,0 +1,61 @@
+#!/bin/sh
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+/bin/busybox --install -s
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+exec </dev/ttyS0 >/dev/ttyS0 2>&1
+stty -echo
+
+fail() {
+    echo "E2E FAIL: $*"
+    poweroff -f
+    while :; do sleep 1; done
+}
+checkpoint() {
+    echo "E2E $1"
+    read -r command
+    [ "$command" = continue ] || fail "unexpected host command: $command"
+}
+wait_file() {
+    tries=0
+    while [ ! -f "$1" ]; do
+        tries=$((tries + 1))
+        [ "$tries" -lt 30 ] || fail "timed out waiting for $1"
+        sleep 1
+    done
+}
+start_client() {
+    rm -f /run/bound /run/renew
+    udhcpc -f -i eth0 -s /dhcp-hook -x hostname:client1 -t 5 -T 2 &
+    client=$!
+    wait_file /run/bound
+}
+
+modprobe virtio_net || fail 'virtio_net module'
+ip link set lo up || fail 'loopback'
+ip link set eth0 up || fail 'guest NIC'
+start_client
+checkpoint BOUND
+/probe -test.v -test.timeout=60s || fail 'initial service checks'
+sleep 2
+rm -f /run/renew
+kill -USR1 "$client" || fail 'renew signal'
+wait_file /run/renew
+checkpoint RENEWED
+# Freeze the DHCP client so successful checks after restart prove restoration,
+# rather than a new registration by a background renewal.
+kill -STOP "$client" || fail 'pause client'
+checkpoint RESTART
+/probe -test.v -test.timeout=60s || fail 'service checks after restart'
+kill -CONT "$client" || fail 'resume client'
+kill -USR2 "$client" || fail 'release signal'
+checkpoint RELEASED
+kill "$client"
+wait "$client" 2>/dev/null
+start_client
+kill -KILL "$client" || fail 'stop client without releasing'
+wait "$client" 2>/dev/null
+checkpoint EXPIRING
+echo 'E2E PASS'
+poweroff -f

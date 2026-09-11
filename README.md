@@ -602,7 +602,8 @@ authentication.
 Build with `make build` and run the checks below before submitting a change.
 For changes to DHCP, DNS, or lease behavior, all three commands are required.
 Network tests must use loopback sockets or in-memory connections without
-serving the host LAN.
+serving the host LAN. The explicit QEMU suite below is an exception and uses
+only a disconnected network namespace.
 
 ```sh
 go test -race ./...
@@ -633,6 +634,50 @@ detection, shuffled order, and test caching disabled. A separate lint job checks
 module consistency, `go vet`, golangci-lint (including integration tests), Go
 formatting, and known vulnerabilities with `govulncheck`. The workflow uses the
 latest Go 1.26 patch release and read-only repository permissions.
+
+### QEMU end-to-end test
+
+On an x86-64 Linux host, install the prerequisites and run:
+
+```sh
+sudo apt-get install qemu-system-x86 iproute2 tcpdump dnsutils cpio curl
+make e2e-qemu
+```
+
+This requires Go, Python 3, `/dev/net/tun`, and sudo permission to create network
+namespaces and TAP interfaces. The target downloads a checksum-pinned Alpine
+3.23.3 netboot archive (about 364 MiB) into `.cache/e2e-qemu`, builds the server
+with the race detector, and builds a static Go test probe for the guest. The
+guest uses Alpine's kernel, BusyBox DHCP client, and virtio drivers, with a small
+test-specific init script. No packages are installed or downloaded in the guest.
+
+The harness starts the complete server and a QEMU Linux guest in a fresh network
+namespace containing only loopback and `tap0`. The server uses
+`192.168.77.1/24`; the guest obtains its address from DHCP. There is no physical
+interface, host bridge, uplink, default gateway, or DNS forwarder. QEMU uses
+software emulation so the same test works on GitHub runners without KVM.
+
+The guest verifies DHCP address, subnet, DNS and search-domain options; forward
+and reverse DNS over UDP and TCP; short-name resolution; HTTPS with the generated
+CA; ACME certificate issuance with a real port-80 HTTP-01 callback; and LDAP/LDAPS
+authentication and searches, including rejection of an incorrect password.
+The public CA is supplied through the guest initramfs, and TLS verification
+remains enabled.
+
+The harness checks that renewal advances the persisted lease expiration, pauses
+the DHCP client while restarting the server to verify lease restoration, and
+runs the guest service checks again. Finally it verifies that release and actual
+lease expiration remove forward and reverse DNS records. A one-minute lease
+keeps this test reasonably short. Serial-console checkpoints and bounded waits
+make failures observable even when guest networking is broken.
+
+Each run writes `guest.log`, `server.log`, `tcpdump.log`, and `network.pcap` under
+`artifacts/e2e-qemu/<run-id>/`. Temporary guest files, server state, processes, and
+the network namespace are removed on exit, including ordinary failures and
+interrupts. Private CA keys are not retained in the artifacts. GitHub Actions
+runs `make e2e-qemu` in its own job on every push, pull request, and manual run,
+and uploads the diagnostics for seven days even when the test fails. This suite
+is separate from `make check` because it needs network administration privileges.
 
 ## License
 
