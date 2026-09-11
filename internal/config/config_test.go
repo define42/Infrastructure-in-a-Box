@@ -142,7 +142,6 @@ func TestLoadOverrides(t *testing.T) {
 		"dns_ttl", "10s",
 		"dhcp_listen", "192.168.50.2:1067",
 		"upstream", "127.0.0.1:53",
-		"https_listen", ":8443",
 		"ca_dir", "/var/lib/infra-box/pki",
 	)
 	cfg, err := config.Load(path)
@@ -158,7 +157,7 @@ func TestLoadOverrides(t *testing.T) {
 	if cfg.DNSAddress != "192.168.50.2:53" || cfg.DHCPAddress != "192.168.50.2:1067" || cfg.Upstream != "127.0.0.1:53" {
 		t.Errorf("incorrect listener settings: %+v", cfg)
 	}
-	if cfg.HTTPSAddress != ":8443" || cfg.CADirectory != "/var/lib/infra-box/pki" {
+	if cfg.HTTPSAddress != "192.168.50.2:443" || cfg.CADirectory != "/var/lib/infra-box/pki" {
 		t.Errorf("incorrect HTTPS/CA settings: %+v", cfg)
 	}
 	if cfg.ACMEStateFile != "/var/lib/infra-box/pki/acme.json" {
@@ -166,7 +165,7 @@ func TestLoadOverrides(t *testing.T) {
 	}
 }
 
-func TestLoadDNSAddressFollowsServerIP(t *testing.T) {
+func TestLoadListenerAddressesFollowServerIP(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct{ name, serverIP string }{
 		{name: "default server", serverIP: "192.168.50.2"},
@@ -180,6 +179,9 @@ func TestLoadDNSAddressFollowsServerIP(t *testing.T) {
 			}
 			if want := tc.serverIP + ":53"; cfg.DNSAddress != want {
 				t.Errorf("DNSAddress = %q, want %q", cfg.DNSAddress, want)
+			}
+			if want := tc.serverIP + ":443"; cfg.HTTPSAddress != want {
+				t.Errorf("HTTPSAddress = %q, want %q", cfg.HTTPSAddress, want)
 			}
 		})
 	}
@@ -205,6 +207,31 @@ func TestLoadRejectsDNSListen(t *testing.T) {
 			_, err := config.Load(writeRawConfig(t, data))
 			if err == nil || !strings.Contains(err.Error(), `unknown configuration key "dns_listen"`) {
 				t.Fatalf("Load() error = %v, want unknown dns_listen key", err)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsHTTPSListen(t *testing.T) {
+	t.Parallel()
+	base, err := json.Marshal(validValues())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, raw string }{
+		{name: "empty", raw: `""`},
+		{name: "old default", raw: `"192.168.50.2:443"`},
+		{name: "wildcard", raw: `"0.0.0.0:443"`},
+		{name: "custom port", raw: `"192.168.50.2:8443"`},
+		{name: "null", raw: `null`},
+		{name: "number", raw: `443`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			data := strings.TrimSuffix(string(base), "}") + `,"https_listen":` + tc.raw + "}"
+			_, err := config.Load(writeRawConfig(t, data))
+			if err == nil || !strings.Contains(err.Error(), `unknown configuration key "https_listen"`) {
+				t.Fatalf("Load() error = %v, want unknown https_listen key", err)
 			}
 		})
 	}
@@ -250,7 +277,7 @@ func TestLoadOptionalEmptyValues(t *testing.T) {
 	t.Parallel()
 	path := writeConfig(t,
 		"router", "", "upstream", "", "lease_file", "",
-		"https_listen", "", "acme_state", "",
+		"acme_state", "",
 	)
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -540,36 +567,6 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 			want:   "dhcp_listen conflicts with DNS on UDP port 53",
 		},
 		{
-			name:   "https and dns tcp conflict",
-			values: []string{"https_listen", ":53"},
-			want:   "https_listen conflicts with DNS on TCP port 53",
-		},
-		{
-			name:   "https hostname needs resolution",
-			values: []string{"https_listen", "gateway.home.arpa:443"},
-			want:   "numeric ipv4",
-		},
-		{
-			name:   "https not advertised server",
-			values: []string{"https_listen", "192.168.50.3:443"},
-			want:   "https_listen must bind",
-		},
-		{
-			name:   "zero https port",
-			values: []string{"https_listen", ":0"},
-			want:   "between 1 and 65535",
-		},
-		{
-			name:   "large https port",
-			values: []string{"https_listen", ":65536"},
-			want:   "between 1 and 65535",
-		},
-		{
-			name:   "ipv6 https listener",
-			values: []string{"https_listen", "[::]:443"},
-			want:   "numeric ipv4",
-		},
-		{
 			name:   "empty CA directory",
 			values: []string{"ca_dir", ""},
 			want:   "persistent directory",
@@ -663,12 +660,12 @@ func TestLoadBoundaryValues(t *testing.T) {
 			values: []string{"domain", strings.Repeat("abcd.", 48) + "ab"},
 		},
 		{
-			name:   "wildcard DHCP and HTTPS listeners",
-			values: []string{"dhcp_listen", "0.0.0.0:67", "https_listen", "0.0.0.0:443"},
+			name:   "wildcard DHCP listener",
+			values: []string{"dhcp_listen", "0.0.0.0:67"},
 		},
 		{
 			name:   "dhcp and https use separate transports",
-			values: []string{"https_listen", ":67"},
+			values: []string{"dhcp_listen", ":443"},
 		},
 		{
 			name:   "upstream same server different port",
@@ -834,7 +831,7 @@ func configKeys() []string {
 	return []string{
 		"interface", "server_ip", "subnet", "pool_start", "pool_end", "router",
 		"domain", "lease_duration", "lease_file", "dhcp_listen",
-		"upstream", "dns_ttl", "https_listen", "ca_dir", "acme_state",
+		"upstream", "dns_ttl", "ca_dir", "acme_state",
 	}
 }
 

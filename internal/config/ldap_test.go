@@ -299,8 +299,6 @@ func TestLoadLDAPListenerAndDNSReservations(t *testing.T) {
 		records string
 		want    string
 	}{
-		{name: "HTTPS LDAP conflict", setting: `"https_listen":"192.168.50.2:389"`, want: "LDAP listener and https_listen must use different tcp ports"},
-		{name: "HTTPS LDAPS conflict", setting: `"https_listen":"192.168.50.2:636"`, want: "LDAPS listener and https_listen must use different tcp ports"},
 		{name: "UDP LDAP port allowed", setting: `"dhcp_listen":":389"`},
 		{name: "UDP LDAPS port allowed", setting: `"dhcp_listen":":636"`},
 		{name: "existing identical record", records: `{"LDAP":"192.168.50.2"}`},

@@ -18,7 +18,7 @@ import (
 // An invalid Router means no default gateway is advertised; an empty LeaseFile
 // disables persistence and an empty Upstream disables external DNS forwarding.
 // Loaded persistence paths are absolute; relative JSON values resolve beside the file.
-// DNSAddress is derived from ServerIP using the fixed DNS port 53.
+// DNSAddress and HTTPSAddress are derived from ServerIP using ports 53 and 443.
 type Config struct {
 	Interface     string
 	DHCPAddress   string
@@ -99,9 +99,7 @@ func (settings fileSettings) config() (Config, error) {
 		return Config{}, err
 	}
 	cfg.DNSAddress = net.JoinHostPort(cfg.ServerIP.String(), "53")
-	if cfg.HTTPSAddress == "" {
-		cfg.HTTPSAddress = net.JoinHostPort(cfg.ServerIP.String(), "443")
-	}
+	cfg.HTTPSAddress = net.JoinHostPort(cfg.ServerIP.String(), "443")
 	cfg.LDAP.Listen = net.JoinHostPort(cfg.ServerIP.String(), "389")
 	cfg.LDAP.TLSListen = net.JoinHostPort(cfg.ServerIP.String(), "636")
 	if cfg.LDAP.BaseDN == "" {
@@ -229,33 +227,11 @@ func (c Config) validateListeners() error {
 	if err != nil {
 		return err
 	}
-	https, err := parseAddress("https_listen", c.HTTPSAddress, true)
-	if err != nil {
-		return err
-	}
 	if !dhcp.Addr().IsUnspecified() && dhcp.Addr() != c.ServerIP {
 		return errors.New("dhcp_listen must bind to all ipv4 addresses or server_ip")
 	}
-	if !https.Addr().IsUnspecified() && https.Addr() != c.ServerIP {
-		return errors.New("https_listen must bind to all ipv4 addresses or server_ip")
-	}
 	if dhcp.Port() == 53 {
 		return errors.New("dhcp_listen conflicts with DNS on UDP port 53")
-	}
-	if https.Port() == 53 {
-		return errors.New("https_listen conflicts with DNS on TCP port 53")
-	}
-	for _, listener := range []struct{ name, address string }{
-		{name: "LDAP listener", address: c.LDAP.Listen},
-		{name: "LDAPS listener", address: c.LDAP.TLSListen},
-	} {
-		address, err := parseAddress(listener.name, listener.address, false)
-		if err != nil {
-			return err
-		}
-		if address.Port() == https.Port() {
-			return fmt.Errorf("%s and https_listen must use different tcp ports", listener.name)
-		}
 	}
 	if c.Upstream == "" {
 		return nil

@@ -32,7 +32,6 @@ func TestNewGatewayInitializesCAAndACME(t *testing.T) {
 		"pool_end": "192.168.50.20",
 		"lease_duration": "1h",
 		"lease_file": "state/leases.json",
-		"https_listen": ":8443",
 		"ca_dir": "state/pki"
 	}`)
 	if err := os.WriteFile(configPath, data, 0o600); err != nil {
@@ -61,7 +60,7 @@ func TestNewGatewayInitializesCAAndACME(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		request := httptest.NewRequest(http.MethodGet, "https://gateway.home.arpa:8443/acme/directory", nil)
+		request := httptest.NewRequest(http.MethodGet, "https://gateway.home.arpa/acme/directory", nil)
 		request.TLS = &tls.ConnectionState{}
 		response := httptest.NewRecorder()
 		server.ServeHTTP(response, request)
@@ -72,7 +71,7 @@ func TestNewGatewayInitializesCAAndACME(t *testing.T) {
 		if err := json.Unmarshal(response.Body.Bytes(), &directory); err != nil {
 			t.Fatal(err)
 		}
-		if directory["newAccount"] != "https://gateway.home.arpa:8443/acme/new-account" {
+		if directory["newAccount"] != "https://gateway.home.arpa/acme/new-account" {
 			t.Errorf("ACME directory = %v", directory)
 		}
 		response = httptest.NewRecorder()

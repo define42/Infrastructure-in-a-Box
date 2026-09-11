@@ -122,7 +122,6 @@ func (settings *fileSettings) decode(data []byte) error {
 		"dhcp_listen":    &settings.cfg.DHCPAddress,
 		"upstream":       &settings.cfg.Upstream,
 		"dns_ttl":        &settings.dnsTTL,
-		"https_listen":   &settings.cfg.HTTPSAddress,
 		"ca_dir":         &settings.cfg.CADirectory,
 		"acme_state":     &settings.cfg.ACMEStateFile,
 	}

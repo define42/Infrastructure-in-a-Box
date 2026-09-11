@@ -110,8 +110,7 @@ openssl x509 -inform DER -in root-ca.crt -noout -fingerprint -sha256
 
 Install the public root in the operating system or browser's trusted root store
 to enable normal HTTPS access. The application does not change client trust
-stores automatically. If `https_listen` uses another port, include that port in
-the gateway URL and in `curl --resolve`.
+stores automatically. HTTPS always uses port 443.
 
 The CA uses ECDSA P-256 and is valid for ten years. Gateway certificates last up
 to 90 days and renew automatically at startup or a TLS handshake when 30 days
@@ -131,8 +130,7 @@ an unrelated CA. Only one server process may own a CA directory.
 ## ACME certificates with HTTP-01
 
 The ACME directory is `https://gateway.home.arpa/acme/directory`, using the
-configured domain and HTTPS port. With `"https_listen": ":8443"`, use
-`https://gateway.home.arpa:8443/acme/directory`. The API shares the gateway's
+configured domain and fixed HTTPS port 443. The API shares the gateway's
 HTTPS listener and signs certificates under the existing private CA.
 
 An ACME client generates and retains its own account and certificate private
@@ -353,7 +351,6 @@ The maximum file size is 1 MiB.
 | `upstream` | `""` | Optional numeric IPv4 address and port for external DNS, such as `1.1.1.1:53`; empty disables forwarding. |
 | `dns_ttl` | `1m` | Maximum TTL for DNS records, in whole seconds, at least `1s`. |
 | `a_records` | `{}` | Exact or wildcard DNS names mapped to IPv4 address strings, including external-name overrides. |
-| `https_listen` | `<server_ip>:443` | Gateway HTTPS TCP listener; empty also selects this default. |
 | `ca_dir` | `pki` | Persistent directory for the private CA and service certificates. |
 | `acme_state` | `<ca_dir>/acme.json` | Persistent ACME accounts, orders, certificates, and revocations; empty also selects this default. Must differ from the lease and CA certificate/key files. |
 | `ldap` | LDAP on `<server_ip>:389`; LDAPS on `<server_ip>:636` | Directory suffix, users, groups, and search permissions for both always-running listeners. See above. |
@@ -376,10 +373,11 @@ with `-config /path/to/config.json`. Keep existing state paths absolute, or
 adjust relative paths for the configuration file's location, so the server
 continues using the same leases, CA, and ACME state.
 
-DNS always listens on `<server_ip>:53` for UDP and TCP. Remove `dns_listen`
-from older configuration files; that key is no longer accepted. DHCP and HTTPS
-listeners accept `:port`, `0.0.0.0:port`, or `<server_ip>:port`. Alternate DHCP
-ports support development, but normal DHCP clients expect port 67. Hostname-based upstream
+DNS always listens on `<server_ip>:53` for UDP and TCP, and HTTPS always listens
+on `<server_ip>:443`. Remove `dns_listen` and `https_listen` from older
+configuration files; those keys are no longer accepted. The DHCP listener
+accepts `:port`, `0.0.0.0:port`, or `<server_ip>:port`. Alternate DHCP ports
+support development, but normal DHCP clients expect port 67. Hostname-based upstream
 addresses are rejected to avoid depending on DNS during startup. An upstream
 must not point back to the DNS listener.
 
