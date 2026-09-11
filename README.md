@@ -350,7 +350,6 @@ The maximum file size is 1 MiB.
 | `lease_duration` | `12h` | Lease lifetime, in whole seconds, at least `1m`. |
 | `lease_file` | `leases.json` | Persisted lease state; set to `""` for memory only. |
 | `dhcp_listen` | `:67` | DHCP UDP listener. |
-| `dns_listen` | `<server_ip>:53` | DNS UDP and TCP listener; empty also selects this default. |
 | `upstream` | `""` | Optional numeric IPv4 address and port for external DNS, such as `1.1.1.1:53`; empty disables forwarding. |
 | `dns_ttl` | `1m` | Maximum TTL for DNS records, in whole seconds, at least `1s`. |
 | `a_records` | `{}` | Exact or wildcard DNS names mapped to IPv4 address strings, including external-name overrides. |
@@ -377,9 +376,10 @@ with `-config /path/to/config.json`. Keep existing state paths absolute, or
 adjust relative paths for the configuration file's location, so the server
 continues using the same leases, CA, and ACME state.
 
-All listeners accept `:port`, `0.0.0.0:port`, or `<server_ip>:port`. Alternate
-ports support development, but normal DHCP clients expect DHCP port 67 and DNS
-port 53; DHCP cannot advertise an alternate DNS port. Hostname-based upstream
+DNS always listens on `<server_ip>:53` for UDP and TCP. Remove `dns_listen`
+from older configuration files; that key is no longer accepted. DHCP and HTTPS
+listeners accept `:port`, `0.0.0.0:port`, or `<server_ip>:port`. Alternate DHCP
+ports support development, but normal DHCP clients expect port 67. Hostname-based upstream
 addresses are rejected to avoid depending on DNS during startup. An upstream
 must not point back to the DNS listener.
 

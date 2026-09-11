@@ -119,7 +119,6 @@ func (settings *fileSettings) decode(data []byte) error {
 		"domain":         &settings.cfg.Domain,
 		"lease_duration": &settings.leaseDuration,
 		"lease_file":     &settings.cfg.LeaseFile,
-		"dns_listen":     &settings.cfg.DNSAddress,
 		"dhcp_listen":    &settings.cfg.DHCPAddress,
 		"upstream":       &settings.cfg.Upstream,
 		"dns_ttl":        &settings.dnsTTL,

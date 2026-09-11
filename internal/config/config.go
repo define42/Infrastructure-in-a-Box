@@ -18,6 +18,7 @@ import (
 // An invalid Router means no default gateway is advertised; an empty LeaseFile
 // disables persistence and an empty Upstream disables external DNS forwarding.
 // Loaded persistence paths are absolute; relative JSON values resolve beside the file.
+// DNSAddress is derived from ServerIP using the fixed DNS port 53.
 type Config struct {
 	Interface     string
 	DHCPAddress   string
@@ -97,9 +98,7 @@ func (settings fileSettings) config() (Config, error) {
 	if err := validateDuration("dns_ttl", cfg.DNSTTL, time.Second); err != nil {
 		return Config{}, err
 	}
-	if cfg.DNSAddress == "" {
-		cfg.DNSAddress = net.JoinHostPort(cfg.ServerIP.String(), "53")
-	}
+	cfg.DNSAddress = net.JoinHostPort(cfg.ServerIP.String(), "53")
 	if cfg.HTTPSAddress == "" {
 		cfg.HTTPSAddress = net.JoinHostPort(cfg.ServerIP.String(), "443")
 	}
@@ -230,10 +229,6 @@ func (c Config) validateListeners() error {
 	if err != nil {
 		return err
 	}
-	dns, err := parseAddress("dns_listen", c.DNSAddress, true)
-	if err != nil {
-		return err
-	}
 	https, err := parseAddress("https_listen", c.HTTPSAddress, true)
 	if err != nil {
 		return err
@@ -241,17 +236,14 @@ func (c Config) validateListeners() error {
 	if !dhcp.Addr().IsUnspecified() && dhcp.Addr() != c.ServerIP {
 		return errors.New("dhcp_listen must bind to all ipv4 addresses or server_ip")
 	}
-	if !dns.Addr().IsUnspecified() && dns.Addr() != c.ServerIP {
-		return errors.New("dns_listen must bind to all ipv4 addresses or server_ip")
-	}
 	if !https.Addr().IsUnspecified() && https.Addr() != c.ServerIP {
 		return errors.New("https_listen must bind to all ipv4 addresses or server_ip")
 	}
-	if dhcp.Port() == dns.Port() {
-		return errors.New("dhcp_listen and dns_listen must use different udp ports")
+	if dhcp.Port() == 53 {
+		return errors.New("dhcp_listen conflicts with DNS on UDP port 53")
 	}
-	if https.Port() == dns.Port() {
-		return errors.New("https_listen and dns_listen must use different tcp ports")
+	if https.Port() == 53 {
+		return errors.New("https_listen conflicts with DNS on TCP port 53")
 	}
 	for _, listener := range []struct{ name, address string }{
 		{name: "LDAP listener", address: c.LDAP.Listen},
@@ -261,8 +253,8 @@ func (c Config) validateListeners() error {
 		if err != nil {
 			return err
 		}
-		if address.Port() == dns.Port() || address.Port() == https.Port() {
-			return fmt.Errorf("%s, dns_listen, and https_listen must use different tcp ports", listener.name)
+		if address.Port() == https.Port() {
+			return fmt.Errorf("%s and https_listen must use different tcp ports", listener.name)
 		}
 	}
 	if c.Upstream == "" {
@@ -275,9 +267,7 @@ func (c Config) validateListeners() error {
 	if !upstream.Addr().IsGlobalUnicast() && !upstream.Addr().IsLoopback() {
 		return errors.New("upstream must identify a unicast dns server")
 	}
-	isServerAddress := upstream.Addr() == c.ServerIP || upstream.Addr() == dns.Addr()
-	isWildcardLoopback := dns.Addr().IsUnspecified() && upstream.Addr().IsLoopback()
-	if upstream.Port() == dns.Port() && (isServerAddress || isWildcardLoopback) {
+	if upstream.Port() == 53 && upstream.Addr() == c.ServerIP {
 		return errors.New("upstream must not point back to the dns listener")
 	}
 	return nil
