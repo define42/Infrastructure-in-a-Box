@@ -1,15 +1,12 @@
 // Package dnsname normalizes configured DNS record names.
 package dnsname
 
-import (
-	"strings"
+import "strings"
 
-	"github.com/define42/Infrastructure-in-a-Box/internal/lease"
-)
-
-// NormalizeARecord returns a lowercase, fully qualified local A record name.
-// It accepts hostnames, @ for the zone apex, and a single leftmost wildcard
-// label. Domain must already be a valid DNS domain. Invalid names return "".
+// NormalizeARecord returns a lowercase, fully qualified A record name.
+// Short hostnames, @, *, and wildcard parents with a single label are relative
+// to domain. Other names may be inside or outside domain. Only a single leftmost
+// wildcard label is allowed. Domain must be valid. Invalid names return "".
 func NormalizeARecord(name, domain string) string {
 	for _, c := range name {
 		if c > 127 {
@@ -18,23 +15,38 @@ func NormalizeARecord(name, domain string) string {
 	}
 	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
 	name = strings.ToLower(strings.TrimSuffix(name, "."))
-	if name == "@" || name == domain {
-		return domain + "."
+	if name == "@" {
+		name = domain
 	}
 	if name == "*" {
 		name = "*." + domain
 	}
-	if parent, wildcard := strings.CutPrefix(name, "*."); wildcard {
-		if parent == domain {
-			parent += "."
-		} else {
-			parent = lease.NormalizeHostname(parent, domain)
-		}
-		// The textual name, excluding its root dot, must fit 253 bytes.
-		if parent == "" || len(parent)+2 > 254 {
-			return ""
-		}
-		return "*." + parent
+	name, wildcard := strings.CutPrefix(name, "*.")
+	if name != domain && !strings.Contains(name, ".") {
+		name += "." + domain
 	}
-	return lease.NormalizeHostname(name, domain)
+	if !validHostname(name) {
+		return ""
+	}
+	if wildcard {
+		name = "*." + name
+	}
+	if len(name) > 253 {
+		return ""
+	}
+	return name + "."
+}
+
+func validHostname(name string) bool {
+	for label := range strings.SplitSeq(name, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, c := range label {
+			if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+				return false
+			}
+		}
+	}
+	return true
 }

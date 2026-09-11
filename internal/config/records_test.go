@@ -19,6 +19,21 @@ func TestLoadARecords(t *testing.T) {
 	}{
 		{name: "empty", raw: `{}`},
 		{
+			name: "external names", raw: `{"GOOGLE.COM.":"192.168.50.10","*.Google.Com":"192.168.50.20"}`,
+			want: map[string]netip.Addr{
+				"google.com.":   netip.MustParseAddr("192.168.50.10"),
+				"*.google.com.": netip.MustParseAddr("192.168.50.20"),
+			},
+		},
+		{
+			name: "external gateway name", raw: `{"gateway.example.com":"192.168.50.10"}`,
+			want: map[string]netip.Addr{"gateway.example.com.": netip.MustParseAddr("192.168.50.10")},
+		},
+		{
+			name: "similar external suffix", raw: `{"nothome.arpa":"192.168.50.10"}`,
+			want: map[string]netip.Addr{"nothome.arpa.": netip.MustParseAddr("192.168.50.10")},
+		},
+		{
 			name: "wildcard shorthand", raw: `{"*":"192.168.50.20"}`,
 			want: map[string]netip.Addr{"*.home.arpa.": netip.MustParseAddr("192.168.50.20")},
 		},
@@ -88,10 +103,11 @@ func TestLoadRejectsInvalidARecords(t *testing.T) {
 		{name: "duplicate normalized name", raw: `{"Printer":"192.168.50.10","printer.home.arpa.":"192.168.50.20"}`},
 		{name: "duplicate apex", raw: `{"@":"192.168.50.10","home.arpa":"192.168.50.20"}`},
 		{name: "empty name", raw: `{"":"192.168.50.10"}`},
-		{name: "external name", raw: `{"outside.example":"192.168.50.10"}`},
+		{name: "duplicate external name", raw: `{"google.com":"192.168.50.10","GOOGLE.COM.":"192.168.50.20"}`},
+		{name: "duplicate external wildcard", raw: `{"*.google.com":"192.168.50.10","*.GOOGLE.COM.":"192.168.50.20"}`},
 		{name: "duplicate wildcard", raw: `{"*":"192.168.50.10","*.HOME.ARPA.":"192.168.50.20"}`},
 		{name: "duplicate relative wildcard", raw: `{"*.apps":"192.168.50.10","*.apps.home.arpa":"192.168.50.20"}`},
-		{name: "external wildcard", raw: `{"*.example.com":"192.168.50.10"}`},
+		{name: "invalid external label", raw: `{"*.bad_name.example.com":"192.168.50.10"}`},
 		{name: "partial wildcard", raw: `{"app*.home.arpa":"192.168.50.10"}`},
 		{name: "nonleftmost wildcard", raw: `{"app.*.home.arpa":"192.168.50.10"}`},
 		{name: "repeated wildcard", raw: `{"*.*.home.arpa":"192.168.50.10"}`},

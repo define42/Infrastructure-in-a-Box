@@ -15,7 +15,8 @@
   "a_records": {
     "printer": "192.168.50.10",
     "nas": "192.168.50.20",
-    "*.apps.home.arpa": "192.168.50.20"
+    "*.apps.home.arpa": "192.168.50.20",
+    "service.example.com": "192.168.50.20"
   },
   "https_listen": "192.168.50.2:443",
   "ca_dir": "/var/lib/infra-box/pki",

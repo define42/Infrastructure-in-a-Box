@@ -92,7 +92,7 @@ func TestNewGatewayInitializesCAAndACME(t *testing.T) {
 	}
 }
 
-func TestStaticDNSNamesAreReservedAtStartup(t *testing.T) {
+func TestDNSOverridesAtStartup(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "config.json")
 	data := []byte(`{
@@ -104,7 +104,9 @@ func TestStaticDNSNamesAreReservedAtStartup(t *testing.T) {
 		"lease_file": "",
 		"a_records": {
 			"printer": "192.168.50.10", "@": "192.168.50.2",
-			"*": "192.168.50.20", "*.apps.home.arpa": "192.168.50.30"
+			"*": "192.168.50.20", "*.apps.home.arpa": "192.168.50.30",
+			"google.com": "192.168.50.40", "*.google.com": "192.168.50.50",
+			"nothome.arpa": "192.168.50.60", "home.arpa.example.com": "192.168.50.70"
 		}
 	}`)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
@@ -143,9 +145,19 @@ func TestStaticDNSNamesAreReservedAtStartup(t *testing.T) {
 	if _, err := validator.Lookup("dashboard.apps.home.arpa"); err != nil {
 		t.Fatalf("wildcard blocked exact DHCP authorization: %v", err)
 	}
-	for _, name := range []string{"*.home.arpa", "*.apps.home.arpa", "missing.apps.home.arpa"} {
+	assigned, err = leases.Commit("client-4", cfg.PoolStart.Next().Next().Next(), "google.com")
+	if err != nil || assigned.Hostname != "" {
+		t.Fatalf("external override allowed a DHCP registration outside the local domain: %+v, %v", assigned, err)
+	}
+	assigned, err = leases.Commit("client-4", assigned.IP, "google")
+	if err != nil || assigned.Hostname != "google.home.arpa." {
+		t.Fatalf("external override blocked a local DHCP hostname: %+v, %v", assigned, err)
+	}
+	for _, name := range []string{
+		"*.home.arpa", "*.apps.home.arpa", "missing.apps.home.arpa", "google.com", "*.google.com", "www.google.com",
+	} {
 		if _, err := validator.Lookup(name); !errors.Is(err, acmevalidate.ErrRejectedIdentifier) {
-			t.Errorf("wildcard granted authorization for %q: %v", name, err)
+			t.Errorf("DNS override granted authorization for %q: %v", name, err)
 		}
 	}
 	if cfg.ARecords["printer.home.arpa."] != netip.MustParseAddr("192.168.50.10") {

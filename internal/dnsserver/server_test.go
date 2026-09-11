@@ -109,8 +109,8 @@ func TestNewARecords(t *testing.T) {
 	}{
 		{"empty hostname", map[string]netip.Addr{"": netip.MustParseAddr("192.168.1.10")}},
 		{"partial wildcard", map[string]netip.Addr{"nas*.home.arpa": netip.MustParseAddr("192.168.1.10")}},
-		{"external hostname", map[string]netip.Addr{"nas.example.org": netip.MustParseAddr("192.168.1.10")}},
-		{"domain suffix confusion", map[string]netip.Addr{"nothome.arpa": netip.MustParseAddr("192.168.1.10")}},
+		{"empty label", map[string]netip.Addr{"nas..example.org": netip.MustParseAddr("192.168.1.10")}},
+		{"multiple wildcards", map[string]netip.Addr{"*.*.example.org": netip.MustParseAddr("192.168.1.10")}},
 		{"underscore", map[string]netip.Addr{"my_nas": netip.MustParseAddr("192.168.1.10")}},
 		{"leading whitespace", map[string]netip.Addr{" nas": netip.MustParseAddr("192.168.1.10")}},
 		{"Unicode case fold", map[string]netip.Addr{"\u212aelvin": netip.MustParseAddr("192.168.1.10")}},
@@ -508,6 +508,88 @@ func TestServeDNSWildcardSingleLabelApex(t *testing.T) {
 	response = queryServer(t, server, new(dns.Msg).SetQuestion("lan.lan.", dns.TypeA))
 	if response.Rcode != dns.RcodeSuccess || len(response.Answer) != 1 || response.Answer[0].(*dns.A).A.String() != clientIP.String() {
 		t.Fatalf("DHCP name did not resolve below single-label zone: %s", response)
+	}
+}
+
+func TestServeDNSExternalARecords(t *testing.T) {
+	t.Parallel()
+	config := testConfig()
+	config.ARecords = map[string]netip.Addr{
+		"Google.COM.":            netip.MustParseAddr("192.168.1.10"),
+		"*.example.net":          netip.MustParseAddr("192.168.1.20"),
+		"fixed.example.net":      netip.MustParseAddr("192.168.1.30"),
+		"leaf.empty.example.net": netip.MustParseAddr("192.168.1.40"),
+		"*.apps.example.net":     netip.MustParseAddr("192.168.1.50"),
+		"*.home.arpa":            netip.MustParseAddr("192.168.1.60"),
+	}
+	server := newTestServer(t, config,
+		// An external entry from a faulty registry must not affect overrides.
+		lease.Lease{Hostname: "host.dhcp.example.net.", IP: netip.MustParseAddr("192.168.1.100"), ExpiresAt: time.Now().Add(time.Hour)},
+	)
+	for _, test := range []struct {
+		name  string
+		query string
+		kind  uint16
+		ip    string
+		zone  string
+	}{
+		{"exact", "google.com.", dns.TypeA, "192.168.1.10", "google.com."},
+		{"case insensitive", "GOOGLE.cOm.", dns.TypeA, "192.168.1.10", "google.com."},
+		{"exact ANY", "google.com.", dns.TypeANY, "192.168.1.10", "google.com."},
+		{"exact AAAA suppression", "google.com.", dns.TypeAAAA, "", "google.com."},
+		{"exact TXT suppression", "google.com.", dns.TypeTXT, "", "google.com."},
+		{"exact excludes descendants", "www.google.com.", dns.TypeA, "", ""},
+		{"wildcard", "www.example.net.", dns.TypeA, "192.168.1.20", "example.net."},
+		{"wildcard multiple absent levels", "a.b.example.net.", dns.TypeA, "192.168.1.20", "example.net."},
+		{"wildcard AAAA suppression", "www.example.net.", dns.TypeAAAA, "", "example.net."},
+		{"wildcard excludes parent", "example.net.", dns.TypeA, "", ""},
+		{"exact overrides wildcard", "fixed.example.net.", dns.TypeA, "192.168.1.30", "fixed.example.net."},
+		{"exact subtree blocks wildcard", "child.fixed.example.net.", dns.TypeA, "", ""},
+		{"empty non-terminal falls through", "empty.example.net.", dns.TypeA, "", ""},
+		{"empty non-terminal blocks wildcard", "other.empty.example.net.", dns.TypeA, "", ""},
+		{"nested wildcard", "www.apps.example.net.", dns.TypeA, "192.168.1.50", "apps.example.net."},
+		{"nested wildcard excludes parent", "apps.example.net.", dns.TypeA, "", ""},
+		{"external lease ignored", "host.dhcp.example.net.", dns.TypeA, "192.168.1.20", "example.net."},
+		{"external lease ancestor ignored", "dhcp.example.net.", dns.TypeA, "192.168.1.20", "example.net."},
+		{"unrelated domain", "unrelated.org.", dns.TypeA, "", ""},
+		{"suffix boundary", "notexample.net.", dns.TypeA, "", ""},
+		{"top level domain", "net.", dns.TypeA, "", ""},
+		{"DNS root", ".", dns.TypeA, "", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			for _, recursive := range []bool{false, true} {
+				query := new(dns.Msg).SetQuestion(test.query, test.kind)
+				query.RecursionDesired = recursive
+				response := queryServer(t, server, query)
+				if test.zone == "" {
+					if response.Rcode != dns.RcodeRefused || response.Authoritative || len(response.Answer) != 0 || len(response.Ns) != 0 {
+						t.Fatalf("unmatched external owner was overridden: %s", response)
+					}
+					continue
+				}
+				if response.Rcode != dns.RcodeSuccess || !response.Authoritative || response.RecursionAvailable || response.RecursionDesired != recursive {
+					t.Fatalf("incorrect external override flags: %s", response)
+				}
+				if test.ip == "" {
+					if len(response.Answer) != 0 || len(response.Ns) != 1 {
+						t.Fatalf("override NODATA lacks SOA: %s", response)
+					}
+					soa, ok := response.Ns[0].(*dns.SOA)
+					if !ok || soa.Hdr.Name != test.zone || soa.Hdr.Ttl != 0 || soa.Minttl != 0 {
+						t.Fatalf("override NODATA has incorrect SOA owner or TTL: %s", response)
+					}
+					continue
+				}
+				if len(response.Answer) != 1 {
+					t.Fatalf("expected one external override A record: %s", response)
+				}
+				answer, ok := response.Answer[0].(*dns.A)
+				if !ok || answer.A.String() != test.ip || answer.Hdr.Name != strings.ToLower(test.query) || answer.Hdr.Ttl != 60 {
+					t.Fatalf("incorrect external override A record: %s", response)
+				}
+			}
+		})
 	}
 }
 

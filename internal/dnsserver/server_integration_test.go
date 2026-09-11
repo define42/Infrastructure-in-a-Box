@@ -265,6 +265,117 @@ func TestForwardingIntegration(t *testing.T) {
 	}
 }
 
+func TestExternalOverridesAndForwardingIntegration(t *testing.T) {
+	t.Parallel()
+	var upstreamQueries atomic.Int32
+	upstream := startUpstream(t, dns.HandlerFunc(func(w dns.ResponseWriter, request *dns.Msg) {
+		upstreamQueries.Add(1)
+		response := new(dns.Msg).SetReply(request)
+		response.Answer = []dns.RR{&dns.A{
+			Hdr: header(request.Question[0].Name, dns.TypeA, 300), A: net.IPv4(203, 0, 113, 1),
+		}}
+		if err := w.WriteMsg(response); err != nil {
+			t.Errorf("write upstream answer: %v", err)
+		}
+	}))
+	config := testConfig()
+	config.Upstream = upstream
+	config.ARecords = map[string]netip.Addr{
+		"*.Google.COM.":         netip.MustParseAddr("192.168.1.10"),
+		"fixed.google.com":      netip.MustParseAddr("192.168.1.20"),
+		"leaf.empty.google.com": netip.MustParseAddr("192.168.1.30"),
+		"*.apps.google.com":     netip.MustParseAddr("192.168.1.40"),
+		"example.org":           netip.MustParseAddr("192.168.1.50"),
+	}
+	address := startDNSServer(t, config, lease.Lease{
+		Hostname: "laptop.home.arpa.", IP: netip.MustParseAddr("192.168.1.100"), ExpiresAt: time.Now().Add(time.Hour),
+	})
+	var expectedUpstreamQueries int32
+	for _, network := range []string{"udp", "tcp"} {
+		t.Run(network, func(t *testing.T) {
+			client := dns.Client{Net: network, Timeout: time.Second}
+			for _, test := range []struct {
+				name      string
+				query     string
+				kind      uint16
+				recursive bool
+				forwarded bool
+				code      int
+				ip        string
+				soa       string
+			}{
+				{"wildcard", "www.google.com.", dns.TypeA, true, false, dns.RcodeSuccess, "192.168.1.10", ""},
+				{"nonrecursive wildcard", "WWW.GOOGLE.COM.", dns.TypeA, false, false, dns.RcodeSuccess, "192.168.1.10", ""},
+				{"wildcard multiple absent levels", "a.b.google.com.", dns.TypeA, true, false, dns.RcodeSuccess, "192.168.1.10", ""},
+				{"wildcard AAAA stays local", "www.google.com.", dns.TypeAAAA, true, false, dns.RcodeSuccess, "", "google.com."},
+				{"exact override", "example.org.", dns.TypeA, true, false, dns.RcodeSuccess, "192.168.1.50", ""},
+				{"nonrecursive exact", "example.org.", dns.TypeA, false, false, dns.RcodeSuccess, "192.168.1.50", ""},
+				{"exact AAAA stays local", "example.org.", dns.TypeAAAA, true, false, dns.RcodeSuccess, "", "example.org."},
+				{"exact TXT stays local", "example.org.", dns.TypeTXT, true, false, dns.RcodeSuccess, "", "example.org."},
+				{"exact beats wildcard", "fixed.google.com.", dns.TypeA, true, false, dns.RcodeSuccess, "192.168.1.20", ""},
+				{"nested wildcard", "www.apps.google.com.", dns.TypeA, true, false, dns.RcodeSuccess, "192.168.1.40", ""},
+				{"wildcard parent forwarded", "google.com.", dns.TypeA, true, true, dns.RcodeSuccess, "203.0.113.1", ""},
+				{"nested parent forwarded", "apps.google.com.", dns.TypeA, true, true, dns.RcodeSuccess, "203.0.113.1", ""},
+				{"exact descendant forwarded", "www.example.org.", dns.TypeA, true, true, dns.RcodeSuccess, "203.0.113.1", ""},
+				{"exact blocks broader wildcard", "child.fixed.google.com.", dns.TypeA, true, true, dns.RcodeSuccess, "203.0.113.1", ""},
+				{"empty non-terminal forwarded", "empty.google.com.", dns.TypeA, true, true, dns.RcodeSuccess, "203.0.113.1", ""},
+				{"empty non-terminal blocks wildcard", "other.empty.google.com.", dns.TypeA, true, true, dns.RcodeSuccess, "203.0.113.1", ""},
+				{"unrelated forwarded", "unrelated.net.", dns.TypeA, true, true, dns.RcodeSuccess, "203.0.113.1", ""},
+				{"suffix boundary forwarded", "notgoogle.com.", dns.TypeA, true, true, dns.RcodeSuccess, "203.0.113.1", ""},
+				{"nonrecursive unmatched refused", "google.com.", dns.TypeA, false, false, dns.RcodeRefused, "", ""},
+				{"DHCP stays local", "laptop.home.arpa.", dns.TypeA, true, false, dns.RcodeSuccess, "192.168.1.100", ""},
+				{"missing local stays local", "missing.home.arpa.", dns.TypeA, true, false, dns.RcodeNameError, "", "home.arpa."},
+				{"missing PTR stays local", "10.1.168.192.in-addr.arpa.", dns.TypePTR, true, false, dns.RcodeNameError, "", "1.168.192.in-addr.arpa."},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					query := new(dns.Msg).SetQuestion(test.query, test.kind)
+					query.RecursionDesired = test.recursive
+					response, _, err := client.Exchange(query, address)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if test.forwarded {
+						expectedUpstreamQueries++
+					}
+					if got := upstreamQueries.Load(); got != expectedUpstreamQueries {
+						t.Fatalf("upstream received %d queries, want %d", got, expectedUpstreamQueries)
+					}
+					authoritative := !test.forwarded && test.code != dns.RcodeRefused
+					if response.Rcode != test.code || response.Authoritative != authoritative || !response.RecursionAvailable {
+						t.Fatalf("incorrect override/forwarding flags: %s", response)
+					}
+					if test.ip != "" {
+						if len(response.Answer) != 1 {
+							t.Fatalf("expected one A answer: %s", response)
+						}
+						answer, ok := response.Answer[0].(*dns.A)
+						if !ok || answer.A.String() != test.ip || (!test.forwarded && answer.Hdr.Ttl != 60) {
+							t.Fatalf("incorrect override/forwarding A answer: %s", response)
+						}
+						return
+					}
+					if len(response.Answer) != 0 {
+						t.Fatalf("unexpected answer: %s", response)
+					}
+					if test.soa == "" {
+						if len(response.Ns) != 0 {
+							t.Fatalf("unexpected authority records: %s", response)
+						}
+						return
+					}
+					if len(response.Ns) != 1 {
+						t.Fatalf("negative answer lacks SOA: %s", response)
+					}
+					soa, ok := response.Ns[0].(*dns.SOA)
+					if !ok || soa.Hdr.Name != test.soa || soa.Hdr.Ttl != 0 || soa.Minttl != 0 {
+						t.Fatalf("negative answer has incorrect SOA owner or TTL: %s", response)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestCancelInterruptsForwardingIntegration(t *testing.T) {
 	t.Parallel()
 	received := make(chan struct{}, 1)

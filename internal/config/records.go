@@ -54,7 +54,7 @@ func parseARecords(domain string, records map[string]string) (map[string]netip.A
 	for name, value := range records {
 		canonical := dnsname.NormalizeARecord(name, domain)
 		if canonical == "" {
-			return nil, fmt.Errorf("a_records name %q must be an ASCII hostname or leftmost wildcard in domain %s", name, domain)
+			return nil, fmt.Errorf("a_records name %q must be an ASCII hostname or a single leftmost wildcard", name)
 		}
 		if canonical == "ns."+domain+"." || canonical == "gateway."+domain+"." {
 			return nil, fmt.Errorf("a_records name %q is reserved for the infrastructure server", name)

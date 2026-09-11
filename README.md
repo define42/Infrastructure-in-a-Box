@@ -9,7 +9,7 @@ An ACME v2 server issues certificates for active DHCP hostnames using HTTP-01.
 DHCP packet handling uses `github.com/insomniacslk/dhcp/dhcpv4`, and DNS uses
 `github.com/miekg/dns`.
 Static DNS A records, including wildcard records, can also be configured for
-services and devices.
+services and devices or to override selected external DNS names.
 
 ## Build and run
 
@@ -234,7 +234,7 @@ The maximum file size is 1 MiB.
 | `dns_listen` | `<server_ip>:53` | DNS UDP and TCP listener; empty also selects this default. |
 | `upstream` | `""` | Optional numeric IPv4 address and port for external DNS, such as `1.1.1.1:53`; empty disables forwarding. |
 | `dns_ttl` | `1m` | Maximum TTL for DNS records, in whole seconds, at least `1s`. |
-| `a_records` | `{}` | Exact or wildcard local DNS names mapped to IPv4 address strings. |
+| `a_records` | `{}` | Exact or wildcard DNS names mapped to IPv4 address strings, including external-name overrides. |
 | `https_listen` | `<server_ip>:443` | Gateway HTTPS TCP listener; empty also selects this default. |
 | `ca_dir` | `pki` | Persistent directory for the private CA and gateway certificates. |
 | `acme_state` | `<ca_dir>/acme.json` | Persistent ACME accounts, orders, certificates, and revocations; empty also selects this default. Must differ from the lease and CA certificate/key files. |
@@ -263,10 +263,12 @@ port 53; DHCP cannot advertise an alternate DNS port. Hostname-based upstream
 addresses are rejected to avoid depending on DNS during startup. An upstream
 must not point back to the DNS listener.
 
-By default, DNS serves local names only. To resolve public names as well, add
-`"upstream": "1.1.1.1:53"` or the address of your existing resolver. Local names are
-answered from static records or lease state and never forwarded. Restrict access to the DNS ports
-to the network you intend to serve, particularly when forwarding is enabled.
+Without an upstream, DNS answers the local zone and configured A record
+overrides. To resolve other public names, add `"upstream": "1.1.1.1:53"` or the
+address of your existing resolver. Local names and matching overrides are
+answered locally. Unmatched external names are forwarded to the upstream, or
+receive `REFUSED` when no upstream is configured. Restrict access to the DNS
+ports to the network you intend to serve, particularly when forwarding is enabled.
 
 ## Static DNS A records
 
@@ -282,22 +284,26 @@ Add an `a_records` object to the JSON configuration, then restart the server:
 ```
 
 With `"domain": "home.arpa"`, the exact records resolve `printer.home.arpa`,
-`nas.home.arpa`, and `home.arpa`. Use a single hostname or a fully qualified name
-within the configured domain; `@` means the domain itself. Names are case
-insensitive, and fully qualified names may end in a dot. Duplicate names after
-normalization, names outside the domain, and the reserved exact `ns` and
-`gateway` names are rejected. Each entry maps to one unicast IPv4 address.
+`nas.home.arpa`, and `home.arpa`. Single hostnames are relative to the configured
+domain; `@` means the domain itself. Names with multiple labels, such as
+`nas.home.arpa` or `google.com`, are used as written and may be outside the local
+domain. Names are case insensitive, and fully qualified names may end in a dot.
+Duplicate names after normalization and the reserved exact local names
+`ns.home.arpa` and `gateway.home.arpa` are rejected. Each entry maps to one
+unicast IPv4 address.
 
 Static records are served over both UDP and TCP with the configured `dns_ttl`.
 They remain available independently of DHCP lease expiry. Exact static records
-take precedence over DHCP registrations. DHCP clients attempting to register an
-exact static name still receive an address, but no DNS name; an existing lease
-that conflicts with a new exact static name keeps its address and loses that
-hostname.
+within the local domain take precedence over DHCP registrations. DHCP clients
+attempting to register an exact local static name still receive an address, but
+no DNS name; an existing lease that conflicts with a new exact local static name
+keeps its address and loses that hostname. External entries do not reserve DHCP
+names.
 
 For wildcard records, use `*` or `*.home.arpa` for the zone, or
 `*.apps.home.arpa` for a subdomain. The relative form `*.apps` also becomes
-`*.apps.home.arpa`. Only a complete leftmost `*` label is allowed; partial or
+`*.apps.home.arpa`; `*.google.com` applies to the external name as written.
+Only a complete leftmost `*` label is allowed; partial or
 multiple wildcards such as `app*` or `*.*.home.arpa` are rejected. Wildcards are
 used after infrastructure names, exact static records, and active DHCP names.
 They do not reserve matching DHCP names, so a client can register a name covered
@@ -314,20 +320,46 @@ Adding `status.dev.apps.home.arpa` creates that parent and prevents
 to provide a wildcard there. A wildcard never matches its own parent, so
 `*.apps.home.arpa` does not supply an A record for `apps.home.arpa` itself.
 
+To override an external domain and its otherwise unmatched descendants, add
+both exact and wildcard entries:
+
+```json
+"a_records": {
+  "google.com": "192.168.50.20",
+  "*.google.com": "192.168.50.20"
+}
+```
+
+The exact entry answers for `google.com`; the wildcard can answer for
+`www.google.com`. An exact entry alone does not override `www.google.com`, and
+the wildcard alone does not override `google.com`. Other external names continue
+to use the upstream, or receive `REFUSED` when it is unset. Wildcard matching
+uses configured names and their implied parents; it does not query the upstream
+to discover which external names exist. A closer configured ancestor can
+therefore block a broader wildcard, just as in the local example above.
+
+Matching external overrides are handled before forwarding for every query
+type. `A` and `ANY` queries receive the configured A record; `AAAA`, `TXT`, and
+other query types receive a local `NODATA` response (success with no answers),
+rather than data from the upstream.
+
 These entries create A records only. They do not create PTR records or DHCP IP
 reservations. For devices configured with fixed IPs, use addresses outside the
 DHCP pool. Targets may also be reachable IPv4 addresses outside the local subnet.
 ACME authorization still requires an exact, active DHCP registration. A name
 resolved only through a static or wildcard record is not eligible, and wildcard
-certificates are not supported. Restart after editing `a_records`; cached DNS
-answers may remain until their TTL expires.
+certificates are not supported. External overrides do not enable certificate
+issuance outside the configured local domain. Restart after editing `a_records`;
+cached DNS answers may remain until their TTL expires.
 
-For the example above, check both DNS transports with:
+Check the local and external examples over both DNS transports:
 
 ```sh
 dig @192.168.50.2 printer.home.arpa A
 dig +tcp @192.168.50.2 nas.home.arpa A
 dig @192.168.50.2 shop.apps.home.arpa A
+dig @192.168.50.2 google.com A
+dig +tcp @192.168.50.2 www.google.com A
 ```
 
 ## Lease and DNS behavior

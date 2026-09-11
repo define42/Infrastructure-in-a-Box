@@ -73,8 +73,8 @@ func run(logger *slog.Logger) error {
 func newLeaseManager(cfg config.Config) (*lease.Manager, error) {
 	names := make([]string, 0, len(cfg.ARecords))
 	for name := range cfg.ARecords {
-		// Only exact static hosts are reserved; DHCP names override wildcards.
-		if name != cfg.Domain+"." && !strings.HasPrefix(name, "*.") {
+		// Only exact local hosts are reserved; external overrides do not affect DHCP.
+		if strings.HasSuffix(name, "."+cfg.Domain+".") && !strings.HasPrefix(name, "*.") {
 			names = append(names, name)
 		}
 	}

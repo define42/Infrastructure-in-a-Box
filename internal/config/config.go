@@ -35,7 +35,7 @@ type Config struct {
 	HTTPSAddress  string
 	CADirectory   string
 	ACMEStateFile string
-	// ARecords maps canonical local DNS names (including wildcards) to IPv4 addresses.
+	// ARecords maps canonical DNS names (including external names and wildcards) to IPv4 addresses.
 	ARecords map[string]netip.Addr
 }
 

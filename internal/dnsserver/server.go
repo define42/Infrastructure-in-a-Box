@@ -37,8 +37,9 @@ type Config struct {
 	Domain   string
 	ServerIP netip.Addr
 	Subnet   netip.Prefix
-	// ARecords maps local hostnames and wildcard names to static IPv4 addresses.
-	// Exact static records take precedence over DHCP names and do not create PTRs.
+	// ARecords maps hostnames and wildcard names to static IPv4 addresses. Exact
+	// records take precedence over DHCP names; external matches override forwarding.
+	// These records do not create PTRs.
 	ARecords map[string]netip.Addr
 	// Upstream is a literal IP address and port, such as "1.1.1.1:53".
 	Upstream string
@@ -103,6 +104,7 @@ func New(config Config, registry Registry, logger *slog.Logger) (*Server, error)
 		nsName: "ns." + config.Domain, ttl: uint32(config.TTL / time.Second),
 		gatewayName: "gateway." + config.Domain,
 		staticNames: map[string]struct{}{
+			".":                        {},
 			config.Domain:              {},
 			"ns." + config.Domain:      {},
 			"gateway." + config.Domain: {},
@@ -110,9 +112,12 @@ func New(config Config, registry Registry, logger *slog.Logger) (*Server, error)
 		forwards: make(chan struct{}, 128),
 	}
 	for name := range config.ARecords {
-		for name != config.Domain {
+		for name != "." {
 			server.staticNames[name] = struct{}{}
-			next, _ := dns.NextLabel(name, 0)
+			next, end := dns.NextLabel(name, 0)
+			if end {
+				break
+			}
 			name = name[next:]
 		}
 	}
@@ -124,7 +129,7 @@ func normalizeARecords(domain string, records map[string]netip.Addr) (map[string
 	for name, ip := range records {
 		canonical := dnsname.NormalizeARecord(name, domain)
 		if canonical == "" {
-			return nil, fmt.Errorf("DNS A record %q must name a host within %s", name, domain)
+			return nil, fmt.Errorf("DNS A record %q must be a valid hostname or leftmost wildcard", name)
 		}
 		if canonical == "ns."+domain || canonical == "gateway."+domain {
 			return nil, fmt.Errorf("DNS A record %q conflicts with a reserved infrastructure hostname", name)
@@ -284,6 +289,8 @@ func (s *Server) serveDNS(ctx context.Context, w dns.ResponseWriter, request *dn
 			s.answerLocal(response, name, question.Qtype, s.config.Domain, netip.Addr{})
 		} else if zone, ip, local := s.reverseAuthority(name); local {
 			s.answerLocal(response, name, question.Qtype, zone, ip)
+		} else if address, zone, found := s.lookupExternalAddress(name); found {
+			s.answerOverride(response, name, question.Qtype, zone, address)
 		} else if s.config.Upstream != "" && request.RecursionDesired {
 			response = s.forward(ctx, request, response)
 		} else {
@@ -291,6 +298,19 @@ func (s *Server) serveDNS(ctx context.Context, w dns.ResponseWriter, request *dn
 		}
 	}
 	s.write(w, request, response)
+}
+
+// answerOverride answers only the matched owner. The SOA owner describes that
+// override instead of claiming authority for the unrelated local forward zone.
+func (s *Server) answerOverride(response *dns.Msg, name string, kind uint16, zone string, address netip.Addr) {
+	response.Authoritative = true
+	if kind == dns.TypeA || kind == dns.TypeANY {
+		response.Answer = append(response.Answer, s.addressRecord(name, address, s.ttl))
+		return
+	}
+	soa := s.soa(zone)
+	soa.Hdr.Ttl, soa.Minttl = 0, 0
+	response.Ns = append(response.Ns, soa)
 }
 
 func (s *Server) answerLocal(response *dns.Msg, name string, kind uint16, zone string, ip netip.Addr) {
@@ -370,6 +390,29 @@ func (s *Server) lookupLocalAddress(name string) (netip.Addr, uint32, bool) {
 func (s *Server) hasName(name string) bool {
 	_, exists := s.staticNames[name]
 	return exists || s.registry.HasName(name)
+}
+
+// lookupExternalAddress applies configured overrides without consulting DHCP or
+// taking authority over an entire external zone. Unmatched owners may forward.
+func (s *Server) lookupExternalAddress(name string) (netip.Addr, string, bool) {
+	if address, found := s.config.ARecords[name]; found {
+		return address, name, true
+	}
+	if _, exists := s.staticNames[name]; exists {
+		return netip.Addr{}, "", false
+	}
+	for name != "." {
+		next, end := dns.NextLabel(name, 0)
+		if end {
+			break
+		}
+		name = name[next:]
+		if _, exists := s.staticNames[name]; exists {
+			address, found := s.config.ARecords["*."+name]
+			return address, name, found
+		}
+	}
+	return netip.Addr{}, "", false
 }
 
 func header(name string, kind uint16, ttl uint32) dns.RR_Header {
