@@ -121,6 +121,10 @@ func TestLoadDefaults(t *testing.T) {
 		HTTPSAddress:  "192.168.50.2:443",
 		CADirectory:   filepath.Join(dir, "pki"),
 		ACMEStateFile: filepath.Join(dir, "pki", "acme.json"),
+		LDAP: config.LDAPConfig{
+			Listen: "192.168.50.2:389", TLSListen: "192.168.50.2:636", BaseDN: "dc=home,dc=arpa",
+		},
+		ARecords: map[string]netip.Addr{"ldap.home.arpa.": netip.MustParseAddr("192.168.50.2")},
 	}
 	if !reflect.DeepEqual(cfg, expected) {
 		t.Errorf("Load() = %+v, want %+v", cfg, expected)
@@ -828,6 +832,9 @@ func TestLoadExampleConfiguration(t *testing.T) {
 	}
 	if cfg.Interface != "eth0" || cfg.ServerIP != netip.MustParseAddr("192.168.50.2") {
 		t.Errorf("unexpected example network: %+v", cfg)
+	}
+	if cfg.LDAP.Listen != "192.168.50.2:389" || cfg.LDAP.TLSListen != "192.168.50.2:636" {
+		t.Error("example must serve LDAP and LDAPS on server_ip using ports 389 and 636")
 	}
 }
 

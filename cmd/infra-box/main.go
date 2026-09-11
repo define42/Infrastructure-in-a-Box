@@ -20,6 +20,7 @@ import (
 	"github.com/define42/Infrastructure-in-a-Box/internal/dhcpserver"
 	"github.com/define42/Infrastructure-in-a-Box/internal/dnsserver"
 	"github.com/define42/Infrastructure-in-a-Box/internal/gateway"
+	"github.com/define42/Infrastructure-in-a-Box/internal/ldapserver"
 	"github.com/define42/Infrastructure-in-a-Box/internal/lease"
 	"github.com/define42/Infrastructure-in-a-Box/internal/pki"
 )
@@ -61,13 +62,21 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	https, err := newGateway(cfg, leases, logger)
+	ca, err := newCA(cfg)
+	if err != nil {
+		return err
+	}
+	https, err := newGateway(cfg, ca, leases, logger)
+	if err != nil {
+		return err
+	}
+	ldap, err := newLDAP(cfg, ca, logger)
 	if err != nil {
 		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return serve(ctx, dhcp.Run, dns.Run, https.Run)
+	return serve(ctx, dhcp.Run, dns.Run, https.Run, ldap.Run)
 }
 
 func newLeaseManager(cfg config.Config) (*lease.Manager, error) {
@@ -84,7 +93,7 @@ func newLeaseManager(cfg config.Config) (*lease.Manager, error) {
 	})
 }
 
-func newGateway(cfg config.Config, leases *lease.Manager, logger *slog.Logger) (*gateway.Server, error) {
+func newCA(cfg config.Config) (*pki.Manager, error) {
 	baseURL, err := acmeBaseURL(cfg.Domain, cfg.HTTPSAddress)
 	if err != nil {
 		return nil, err
@@ -97,7 +106,17 @@ func newGateway(cfg config.Config, leases *lease.Manager, logger *slog.Logger) (
 	if err != nil {
 		return nil, fmt.Errorf("initialize private CA: %w", err)
 	}
-	validator, err := acmevalidate.New(acmevalidate.Config{Domain: cfg.Domain, Subnet: cfg.Subnet}, leases)
+	return ca, nil
+}
+
+func newGateway(cfg config.Config, ca *pki.Manager, leases *lease.Manager, logger *slog.Logger) (*gateway.Server, error) {
+	baseURL, err := acmeBaseURL(cfg.Domain, cfg.HTTPSAddress)
+	if err != nil {
+		return nil, err
+	}
+	validator, err := acmevalidate.New(acmevalidate.Config{
+		Domain: cfg.Domain, Subnet: cfg.Subnet,
+	}, leases)
 	if err != nil {
 		return nil, fmt.Errorf("initialize ACME validation: %w", err)
 	}
@@ -115,6 +134,17 @@ func newGateway(cfg config.Config, leases *lease.Manager, logger *slog.Logger) (
 	}
 	logger.Info("ACME HTTP-01 enabled", "directory", baseURL+"/directory", "state", cfg.ACMEStateFile)
 	return https, nil
+}
+
+func newLDAP(cfg config.Config, ca *pki.Manager, logger *slog.Logger) (*ldapserver.Server, error) {
+	if _, err := ca.GetLDAPCertificate(nil); err != nil {
+		return nil, fmt.Errorf("initialize LDAP certificate: %w", err)
+	}
+	server, err := ldapserver.New(cfg.LDAP, ca.GetLDAPCertificate, logger)
+	if err != nil {
+		return nil, fmt.Errorf("initialize LDAP server: %w", err)
+	}
+	return server, nil
 }
 
 func acmeBaseURL(domain, address string) (string, error) {

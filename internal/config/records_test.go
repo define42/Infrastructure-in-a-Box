@@ -80,8 +80,10 @@ func TestLoadARecords(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !maps.Equal(cfg.ARecords, tc.want) {
-				t.Errorf("ARecords = %v, want %v", cfg.ARecords, tc.want)
+			want := map[string]netip.Addr{"ldap.home.arpa.": netip.MustParseAddr("192.168.50.2")}
+			maps.Copy(want, tc.want)
+			if !maps.Equal(cfg.ARecords, want) {
+				t.Errorf("ARecords = %v, want %v", cfg.ARecords, want)
 			}
 		})
 	}

@@ -1,8 +1,8 @@
 # Infrastructure-in-a-Box
 
-A Go DHCPv4 server with built-in DNS, a private certificate authority, and an
-HTTPS gateway. Clients receive an IPv4 lease and the server's DNS address;
-their DHCP hostnames become local A and PTR records. `gateway.<domain>` serves
+A Go DHCPv4 server with built-in DNS, a private certificate authority, an
+HTTPS gateway, and LDAP authentication. Clients receive an IPv4 lease and the
+server's DNS address; their DHCP hostnames become local A and PTR records. `gateway.<domain>` serves
 HTTPS using a certificate signed by the private CA and offers its public root
 certificate for download.
 An ACME v2 server issues certificates for active DHCP hostnames using HTTP-01.
@@ -42,7 +42,7 @@ The default configuration path is `config.json` in the current directory;
 `-config /etc/infra-box/config.json` selects a different file. The file must
 exist. Binding the default ports normally requires root or suitable
 operating-system capabilities. Permit client traffic
-to UDP port 67, UDP/TCP port 53, and TCP port 443. Only run one DHCP server for
+to UDP port 67, UDP/TCP port 53, and TCP ports 389, 443, and 636. Only run one DHCP server for
 this pool on the network, and keep statically assigned addresses outside the pool.
 
 The `router` setting advertises an existing default gateway; the application does
@@ -204,6 +204,124 @@ CRL distribution points. Applications must explicitly check the CRL for
 revocation to take effect; there is no OCSP responder. This version supports
 HTTP-01 only, with no DNS-01 or TLS-ALPN-01 challenge support.
 
+## LDAP users and groups
+
+The LDAPv3 server provides authentication and a read-only directory of users and
+groups stored in the JSON configuration. It always starts both listeners,
+including when the `ldap` object is omitted:
+
+| Address | Protocol |
+| --- | --- |
+| `<server_ip>:389` | LDAP over plaintext TCP. |
+| `<server_ip>:636` | LDAPS with TLS from connection establishment. |
+
+Both listeners serve the same directory and authentication rules. Their address
+comes from `server_ip`, and their ports are fixed. Remove `ldap.enabled`,
+`ldap.listen`, and `ldap.tls` from older configuration files; those keys are no
+longer accepted. Without configured users, no account can authenticate. Changes
+take effect after a restart.
+
+The [example configuration](config.example.json) includes two users, their
+groups, and an application search account named `ldap-reader`. All example
+accounts are disabled and contain no passwords. To use them:
+
+1. Generate a different bcrypt password hash for each account you enable. For
+   example, Apache's `htpasswd -nBC 12 johndoe` prompts for a password; copy the portion
+   after `johndoe:` into that user's `pass_bcrypt` JSON string. Repeat for
+   `ldap-reader` and any other accounts. Preserve the complete `$2...` hash.
+2. Set those users' `disabled` fields to false.
+3. Keep the configuration readable only by the service administrator, for
+   example with `chmod 600 config.json`. Restart the server and allow TCP port
+   389 for LDAP and port 636 for LDAPS from the clients that need access.
+4. Give LDAPS clients the public root CA through the trusted channel described
+   above, and configure them to verify the server certificate.
+
+LDAPS uses a separate certificate for `ldap.<domain>` and `server_ip`, signed by
+the existing private CA. Its private key and certificate are stored in
+`<ca_dir>/ldap-bundle.pem` with mode `0600`, and renewed automatically on TLS
+connections. Back it up with the rest of the CA directory. No ACME client is
+needed for this built-in service. LDAP automatically adds the local
+DNS A record `ldap.<domain>` pointing to `server_ip`, and reserves that name
+against DHCP registrations. An explicit conflicting A record is rejected.
+ACME cannot issue client certificates for that service name. Existing ACME state
+remains readable after upgrading.
+
+The nested settings are:
+
+| LDAP key | Default | Meaning |
+| --- | --- | --- |
+| `base_dn` | Derived from `domain` | Directory suffix, such as `dc=home,dc=arpa`. |
+| `users` | `[]` | User objects described below. |
+| `groups` | `[]` | Objects with a unique `name` and positive numeric `gid`. |
+
+Each user has a unique `name`, a `primary_group` referencing a configured group,
+and exactly one password field when enabled. Optional fields are:
+
+| User key | Meaning |
+| --- | --- |
+| `mail` | Email address exposed in directory searches. |
+| `pass_bcrypt` | Standard bcrypt hash, including its salt and cost (4–14). Recommended; use cost 12. |
+| `pass_sha256` | Legacy GLAuth-style hexadecimal SHA-256 password digest; supported for migration. Prefer bcrypt for new passwords. |
+| `uid_number` | Optional positive, unique numeric Unix user ID. Omitting it creates an application account without the `posixAccount` object class. |
+| `other_groups` | Additional group IDs. The primary group is included automatically; repeated memberships appear only once. |
+| `disabled` | Defaults to false. Prevents authentication; the entry remains searchable. Disabled accounts may omit a password. |
+| `can_search` | Defaults to false. Allows the account to search directory entries, including other users and groups. |
+
+Names contain 1–64 ASCII characters: start with a letter or underscore, followed
+by letters, digits, underscores, dots, or hyphens. User and group names are
+unique without regard to case. Numeric IDs must fit a positive signed 32-bit
+integer. Every primary and additional group must exist; for example, a user
+referencing group `5511` requires a group with `"gid": 5511`. Do not specify both
+password fields. Password hashes are never returned through LDAP.
+
+User DNs have the stable form `uid=johndoe,ou=users,dc=home,dc=arpa`; group DNs
+are `cn=team10_r,ou=groups,dc=home,dc=arpa`. Authenticate with the full user DN
+and password. Bind names and DN attributes are matched without regard to case.
+Application accounts with `can_search: true` can search for a user's DN and
+groups, then the application can authenticate that user on a separate connection.
+Ordinary users can bind but cannot search the directory. Anonymous clients can
+read only the base-scope root DSE discovery entry.
+
+After enabling `ldap-reader`, use OpenLDAP's client tools to test a verified TLS
+connection. `-W` prompts for the account password:
+
+```sh
+LDAPTLS_CACERT=/path/to/root-ca.pem ldapsearch -LLL -x \
+  -H ldaps://ldap.home.arpa:636 \
+  -D 'uid=ldap-reader,ou=users,dc=home,dc=arpa' -W \
+  -b 'dc=home,dc=arpa' '(uid=johndoe)' uid cn mail memberOf
+
+LDAPTLS_CACERT=/path/to/root-ca.pem ldapsearch -LLL -x \
+  -H ldaps://ldap.home.arpa:636 \
+  -D 'uid=ldap-reader,ou=users,dc=home,dc=arpa' -W \
+  -b 'ou=groups,dc=home,dc=arpa' \
+  '(member=uid=johndoe,ou=users,dc=home,dc=arpa)' cn gidNumber memberUid
+```
+
+For plaintext LDAP, use `-H ldap://ldap.home.arpa:389` with the same bind DN,
+password, and search base. The CA setting applies only to LDAPS. StartTLS is
+not supported.
+
+Users expose `inetOrgPerson` attributes and derived `memberOf` memberships.
+Users with `uid_number` also expose `posixAccount`, `uidNumber`, `gidNumber`,
+`homeDirectory` (`/home/<name>`), and `loginShell` (`/bin/sh`). Groups expose
+`posixGroup` and `extensibleObject`, with `gidNumber`, `memberUid`, `member`, and
+`uniqueMember`. Configure application group filters with `objectClass=posixGroup`
+and `member=<user DN>`; group names alone do not assign application permissions.
+
+Search supports base, one-level, and subtree scopes, attribute selection,
+types-only responses, and equality, presence, substring, AND, OR, and NOT
+filters. The service allows up to 1,000 results per search, 64 simultaneous
+connections, four simultaneous password checks, and 20 bind attempts per
+connection. Messages are limited to 64 KiB and idle connections to two minutes.
+Searches, writes, and TLS handshakes have ten-second time limits; clients can
+request smaller search limits.
+Directory writes, password-change operations, StartTLS, SASL, and paged searches
+are outside this version's scope. Unknown critical controls return an error;
+noncritical controls may be ignored. Use `ldaps://` for TLS. All services stop
+together on shutdown or a listener failure, so a restart also interrupts LDAP
+authentication.
+
 ## Configuration
 
 All service settings come from a single JSON file. Use `-config` to select the
@@ -214,7 +332,8 @@ the server after editing it.
 
 The file must contain one JSON object using the exact, lowercase keys below.
 Values are strings, including durations and listener addresses, except for
-`a_records`, which is an object mapping DNS names to IPv4 strings. Omitted
+`a_records`, which maps DNS names to IPv4 strings, and the nested `ldap` object
+described above. Omitted
 optional settings use their defaults. Unknown or duplicate keys, `null`, invalid
 value types, comments, trailing commas, and additional JSON values are rejected.
 The maximum file size is 1 MiB.
@@ -236,8 +355,9 @@ The maximum file size is 1 MiB.
 | `dns_ttl` | `1m` | Maximum TTL for DNS records, in whole seconds, at least `1s`. |
 | `a_records` | `{}` | Exact or wildcard DNS names mapped to IPv4 address strings, including external-name overrides. |
 | `https_listen` | `<server_ip>:443` | Gateway HTTPS TCP listener; empty also selects this default. |
-| `ca_dir` | `pki` | Persistent directory for the private CA and gateway certificates. |
+| `ca_dir` | `pki` | Persistent directory for the private CA and service certificates. |
 | `acme_state` | `<ca_dir>/acme.json` | Persistent ACME accounts, orders, certificates, and revocations; empty also selects this default. Must differ from the lease and CA certificate/key files. |
+| `ldap` | LDAP on `<server_ip>:389`; LDAPS on `<server_ip>:636` | Directory suffix, users, groups, and search permissions for both always-running listeners. See above. |
 
 Durations use Go duration strings such as `"12h"`, `"30m"`, or `"60s"` and must
 represent a whole number of seconds. File and directory paths are resolved
@@ -390,7 +510,7 @@ dig +tcp @192.168.50.2 www.google.com A
   atomic file replacement; a failed write prevents the corresponding lease
   change from being acknowledged. Only one process may own a lease file.
 - Interrupt or terminate the process with SIGINT or SIGTERM to stop DHCP, DNS,
-  and HTTPS together. A listener failure also stops the other services.
+  HTTPS, and LDAP together. A listener failure also stops the other services.
 
 This implementation serves one IPv4 subnet and one address pool. It does not
 provide DHCPv6, static reservations, dynamic DNS UPDATE, DNSSEC validation, or
@@ -408,11 +528,14 @@ go vet ./...
 
 Unit tests exercise lease allocation, DHCP packet handling, DNS answers,
 certificate generation and renewal, public CA downloads, and configuration
-validation, plus ACME signed requests and HTTP-01 validation policy.
+validation, LDAP authentication and directory access, plus ACME signed requests
+and HTTP-01 validation policy.
 Integration tests use local sockets on unprivileged
 ports, so they can run without root or changing your network configuration.
 HTTPS tests trust only their generated private root and verify the real TLS
 handshake and certificate downloads.
+LDAP integration tests use loopback sockets and an independent LDAP client to
+exercise binds, searches, group membership, and access restrictions.
 
 The Makefile provides `make build`, `make test`, `make integration`, `make vet`,
 and `make lint`; `make check` runs all of them except the build. The binary is

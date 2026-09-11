@@ -83,13 +83,14 @@ func New(cfg Config, registry Registry) (*Validator, error) {
 
 // Lookup applies identifier policy and returns its current committed DHCP owner.
 // Names are ASCII DNS names beneath Domain, with optional final dot; IP literals,
-// the zone apex, and the gateway and nameserver's reserved names are rejected.
+// the zone apex, and the gateway, nameserver, and LDAP service names are rejected.
 func (v *Validator) Lookup(name string) (Target, error) {
 	name = canonicalName(name)
 	if !validDNSName(name) || !strings.HasSuffix(name, "."+v.cfg.Domain) {
 		return Target{}, fmt.Errorf("%w: name must be a DNS hostname beneath %s", ErrRejectedIdentifier, v.cfg.Domain)
 	}
-	if _, err := netip.ParseAddr(name); err == nil || name == "gateway."+v.cfg.Domain || name == "ns."+v.cfg.Domain {
+	if _, err := netip.ParseAddr(name); err == nil || name == "gateway."+v.cfg.Domain ||
+		name == "ns."+v.cfg.Domain || name == "ldap."+v.cfg.Domain {
 		return Target{}, fmt.Errorf("%w: reserved hostname or IP literal", ErrRejectedIdentifier)
 	}
 	current, ok := v.registry.LookupName(name)

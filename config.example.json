@@ -20,5 +20,42 @@
   },
   "https_listen": "192.168.50.2:443",
   "ca_dir": "/var/lib/infra-box/pki",
-  "acme_state": "/var/lib/infra-box/pki/acme.json"
+  "acme_state": "/var/lib/infra-box/pki/acme.json",
+  "ldap": {
+    "base_dn": "dc=home,dc=arpa",
+    "users": [
+      {
+        "name": "johndoe",
+        "mail": "johndoe@home.arpa",
+        "pass_bcrypt": "",
+        "uid_number": 10001,
+        "primary_group": 5510,
+        "other_groups": [],
+        "disabled": true
+      },
+      {
+        "name": "testuser",
+        "mail": "testuser@home.arpa",
+        "pass_bcrypt": "",
+        "uid_number": 10002,
+        "primary_group": 5505,
+        "other_groups": [5506, 5510, 5511],
+        "disabled": true
+      },
+      {
+        "name": "ldap-reader",
+        "pass_bcrypt": "",
+        "primary_group": 5500,
+        "can_search": true,
+        "disabled": true
+      }
+    ],
+    "groups": [
+      { "name": "service-accounts", "gid": 5500 },
+      { "name": "team1_rwd", "gid": 5505 },
+      { "name": "team2_rw", "gid": 5506 },
+      { "name": "team10_r", "gid": 5510 },
+      { "name": "team11_r", "gid": 5511 }
+    ]
+  }
 }

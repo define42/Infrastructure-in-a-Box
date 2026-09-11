@@ -205,7 +205,9 @@ func (m *Manager) certificateName(name string) string {
 		return ""
 	}
 	canonical := strings.TrimSuffix(lease.NormalizeHostname(name, m.cfg.Domain), ".")
-	if name == "" || canonical != name || name == m.hostname || name == "ns."+strings.TrimPrefix(m.hostname, "gateway.") {
+	domain := strings.TrimPrefix(m.hostname, "gateway.")
+	if name == "" || canonical != name || name == m.hostname || name == "ns."+domain ||
+		name == "ldap."+domain {
 		return ""
 	}
 	return canonical

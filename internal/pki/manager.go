@@ -1,4 +1,4 @@
-// Package pki maintains the private certificate authority and gateway certificate.
+// Package pki maintains the private certificate authority and service certificates.
 package pki
 
 import (
@@ -27,13 +27,14 @@ import (
 const (
 	rootBundleName = "root-ca-bundle.pem"
 	leafBundleName = "gateway-bundle.pem"
+	ldapBundleName = "ldap-bundle.pem"
 	rootPublicName = "root-ca.pem"
 	leafLifetime   = 90 * 24 * time.Hour
 	renewBefore    = 30 * 24 * time.Hour
 	clockSkew      = 5 * time.Minute
 )
 
-// Config identifies the private state directory and gateway certificate names.
+// Config identifies the private state directory and service certificate names.
 type Config struct {
 	Directory string
 	Domain    string
@@ -42,7 +43,7 @@ type Config struct {
 	CRLURL string
 }
 
-// Manager holds a persistent CA and renews its gateway certificate. Certificate
+// Manager holds a persistent CA and renews its service certificates. Certificate
 // and key bundles are private; RootPEM and root-ca.pem contain only the public CA.
 type Manager struct {
 	mu       sync.Mutex
@@ -52,6 +53,7 @@ type Manager struct {
 	root     *tls.Certificate
 	rootPEM  []byte
 	leaf     *tls.Certificate
+	ldapLeaf *tls.Certificate
 }
 
 // Open creates a CA on first use, or loads the existing identity. Invalid or
@@ -109,15 +111,6 @@ func open(cfg Config, now func() time.Time) (*Manager, error) {
 	if err := writeFile(cfg.Directory, rootPublicName, m.rootPEM, 0o644, false); err != nil {
 		return nil, fmt.Errorf("export public root CA: %w", err)
 	}
-	m.leaf, err = readBundle(filepath.Join(cfg.Directory, leafBundleName))
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("load gateway certificate: %w", err)
-	}
-	if m.leaf != nil {
-		if err := m.validateLeaf(); err != nil {
-			return nil, fmt.Errorf("validate gateway certificate: %w", err)
-		}
-	}
 	if _, err := m.GetCertificate(nil); err != nil {
 		return nil, err
 	}
@@ -135,16 +128,48 @@ func (m *Manager) RootPEM() []byte {
 func (m *Manager) GetCertificate(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.serviceCertificate("gateway", m.hostname, leafBundleName, &m.leaf)
+}
+
+// GetLDAPCertificate implements tls.Config.GetCertificate for ldap.<domain> and
+// the configured server IP. It loads or creates its private bundle on first use,
+// so callers should invoke it at LDAP startup to report any invalid private state.
+// Certificates renew within 30 days of expiry and must not be modified by callers.
+// ClientHello names never influence issuance.
+func (m *Manager) GetLDAPCertificate(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	hostname := "ldap." + strings.TrimPrefix(m.hostname, "gateway.")
+	return m.serviceCertificate("LDAP", hostname, ldapBundleName, &m.ldapLeaf)
+}
+
+// serviceCertificate runs with m.mu held, including disk writes, so concurrent
+// handshakes cannot publish different replacements for the same certificate.
+func (m *Manager) serviceCertificate(service, hostname, bundleName string, current **tls.Certificate) (*tls.Certificate, error) {
 	now := m.now()
 	if err := m.validateRoot(now); err != nil {
 		return nil, err
 	}
-	if m.needsRenewal(now) {
-		if err := m.issueLeaf(now); err != nil {
-			return nil, fmt.Errorf("issue gateway certificate: %w", err)
+	if *current == nil {
+		cert, err := readBundle(filepath.Join(m.cfg.Directory, bundleName))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("load %s certificate: %w", service, err)
 		}
+		if cert != nil {
+			if err := m.validateLeaf(cert); err != nil {
+				return nil, fmt.Errorf("validate %s certificate: %w", service, err)
+			}
+		}
+		*current = cert
 	}
-	return m.leaf, nil
+	if m.needsRenewal(*current, hostname, now) {
+		cert, err := m.issueLeaf(hostname, bundleName, now)
+		if err != nil {
+			return nil, fmt.Errorf("issue %s certificate: %w", service, err)
+		}
+		*current = cert
+	}
+	return *current, nil
 }
 
 func (m *Manager) validateRoot(now time.Time) error {
@@ -167,29 +192,29 @@ func (m *Manager) validateRoot(now time.Time) error {
 	return nil
 }
 
-func (m *Manager) validateLeaf() error {
-	leaf := m.leaf.Leaf
+func (m *Manager) validateLeaf(cert *tls.Certificate) error {
+	leaf := cert.Leaf
 	if leaf.IsCA || !leaf.BasicConstraintsValid || leaf.KeyUsage != x509.KeyUsageDigitalSignature ||
 		len(leaf.ExtKeyUsage) != 1 || leaf.ExtKeyUsage[0] != x509.ExtKeyUsageServerAuth {
-		return errors.New("gateway certificate must be a TLS server certificate")
+		return errors.New("certificate must be a TLS server certificate")
 	}
 	if err := leaf.CheckSignatureFrom(m.root.Leaf); err != nil {
-		return fmt.Errorf("gateway certificate does not belong to the root CA: %w", err)
+		return fmt.Errorf("certificate does not belong to the root CA: %w", err)
 	}
 	roots := x509.NewCertPool()
 	roots.AddCert(m.root.Leaf)
 	// Verify structural and chain constraints at issuance time so an expired
-	// otherwise valid gateway certificate can be renewed after a long shutdown.
+	// otherwise valid service certificate can be renewed after a long shutdown.
 	_, err := leaf.Verify(x509.VerifyOptions{Roots: roots, CurrentTime: leaf.NotBefore})
 	return err
 }
 
-func (m *Manager) needsRenewal(now time.Time) bool {
-	if m.leaf == nil {
+func (m *Manager) needsRenewal(cert *tls.Certificate, hostname string, now time.Time) bool {
+	if cert == nil {
 		return true
 	}
-	leaf := m.leaf.Leaf
-	if len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != m.hostname || len(leaf.IPAddresses) != 1 ||
+	leaf := cert.Leaf
+	if len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != hostname || len(leaf.IPAddresses) != 1 ||
 		!leaf.IPAddresses[0].Equal(net.IP(m.cfg.ServerIP.AsSlice())) {
 		return true
 	}
@@ -222,7 +247,7 @@ func (m *Manager) createRoot() (*tls.Certificate, error) {
 	return cert, nil
 }
 
-func (m *Manager) issueLeaf(now time.Time) error {
+func (m *Manager) issueLeaf(hostname, bundleName string, now time.Time) (*tls.Certificate, error) {
 	notBefore, notAfter := now.Add(-clockSkew), now.Add(leafLifetime)
 	if notBefore.Before(m.root.Leaf.NotBefore) {
 		notBefore = m.root.Leaf.NotBefore
@@ -231,24 +256,23 @@ func (m *Manager) issueLeaf(now time.Time) error {
 		notAfter = m.root.Leaf.NotAfter
 	}
 	template := &x509.Certificate{
-		Subject:               pkix.Name{CommonName: m.hostname},
+		Subject:               pkix.Name{CommonName: hostname},
 		NotBefore:             notBefore,
 		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		DNSNames:              []string{m.hostname},
+		DNSNames:              []string{hostname},
 		IPAddresses:           []net.IP{net.IP(m.cfg.ServerIP.AsSlice())},
 	}
 	cert, bundle, err := issue(template, m.root)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err := writeFile(m.cfg.Directory, leafBundleName, bundle, 0o600, false); err != nil {
-		return fmt.Errorf("persist gateway certificate: %w", err)
+	if err := writeFile(m.cfg.Directory, bundleName, bundle, 0o600, false); err != nil {
+		return nil, fmt.Errorf("persist certificate: %w", err)
 	}
-	m.leaf = cert
-	return nil
+	return cert, nil
 }
 
 func issue(template *x509.Certificate, parent *tls.Certificate) (*tls.Certificate, []byte, error) {

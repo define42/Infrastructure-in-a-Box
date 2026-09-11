@@ -224,6 +224,20 @@ func TestSignCSRRejectsInvalidRequests(t *testing.T) {
 	}
 }
 
+func TestSignCSRRejectsLDAPService(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"ldap.home.arpa", "LDAP.Home.Arpa."} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			m := mustOpen(t, testConfig(t), testClock())
+			csr := makeCSR(t, &x509.CertificateRequest{DNSNames: []string{name}}, csrKey(t))
+			if _, err := m.SignCSR(csr, []string{name}); !errors.Is(err, ErrInvalidCSR) {
+				t.Fatalf("built-in LDAP identity returned %v, want ErrInvalidCSR", err)
+			}
+		})
+	}
+}
+
 func TestSignCSRRejectsBadEncodingAndSignature(t *testing.T) {
 	t.Parallel()
 	m := mustOpen(t, testConfig(t), testClock())

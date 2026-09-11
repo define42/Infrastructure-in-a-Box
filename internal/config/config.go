@@ -35,6 +35,7 @@ type Config struct {
 	HTTPSAddress  string
 	CADirectory   string
 	ACMEStateFile string
+	LDAP          LDAPConfig
 	// ARecords maps canonical DNS names (including external names and wildcards) to IPv4 addresses.
 	ARecords map[string]netip.Addr
 }
@@ -102,6 +103,22 @@ func (settings fileSettings) config() (Config, error) {
 	if cfg.HTTPSAddress == "" {
 		cfg.HTTPSAddress = net.JoinHostPort(cfg.ServerIP.String(), "443")
 	}
+	cfg.LDAP.Listen = net.JoinHostPort(cfg.ServerIP.String(), "389")
+	cfg.LDAP.TLSListen = net.JoinHostPort(cfg.ServerIP.String(), "636")
+	if cfg.LDAP.BaseDN == "" {
+		cfg.LDAP.BaseDN = "dc=" + strings.ReplaceAll(cfg.Domain, ".", ",dc=")
+	}
+	if err := cfg.LDAP.Validate(); err != nil {
+		return Config{}, err
+	}
+	name := "ldap." + cfg.Domain + "."
+	if address, exists := cfg.ARecords[name]; exists && address != cfg.ServerIP {
+		return Config{}, errors.New("a_records ldap hostname must point to server_ip")
+	}
+	if cfg.ARecords == nil {
+		cfg.ARecords = make(map[string]netip.Addr)
+	}
+	cfg.ARecords[name] = cfg.ServerIP
 	if strings.TrimSpace(cfg.CADirectory) == "" {
 		return Config{}, errors.New("ca_dir must name a persistent directory")
 	}
@@ -235,6 +252,18 @@ func (c Config) validateListeners() error {
 	}
 	if https.Port() == dns.Port() {
 		return errors.New("https_listen and dns_listen must use different tcp ports")
+	}
+	for _, listener := range []struct{ name, address string }{
+		{name: "LDAP listener", address: c.LDAP.Listen},
+		{name: "LDAPS listener", address: c.LDAP.TLSListen},
+	} {
+		address, err := parseAddress(listener.name, listener.address, false)
+		if err != nil {
+			return err
+		}
+		if address.Port() == dns.Port() || address.Port() == https.Port() {
+			return fmt.Errorf("%s, dns_listen, and https_listen must use different tcp ports", listener.name)
+		}
 	}
 	if c.Upstream == "" {
 		return nil

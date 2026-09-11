@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
 	"log/slog"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/define42/Infrastructure-in-a-Box/internal/acmeauth"
 	"github.com/define42/Infrastructure-in-a-Box/internal/acmevalidate"
+	"github.com/define42/Infrastructure-in-a-Box/internal/lease"
 	"github.com/define42/Infrastructure-in-a-Box/internal/pki"
 	"github.com/go-jose/go-jose/v4"
 )
@@ -200,6 +202,87 @@ func TestOrderRejectsIdentifierPolicy(t *testing.T) {
 				t.Fatalf("identifier accepted: %d %s", rec.Code, rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestOrderRejectsLDAPService(t *testing.T) {
+	t.Parallel()
+	f := setupOrders(t)
+	registry, err := lease.New(lease.Config{
+		Domain: "home.arpa", PoolStart: f.v.target.IP, PoolEnd: f.v.target.IP,
+		LeaseDuration: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Commit(f.v.target.ClientID, f.v.target.IP, "ldap"); err != nil {
+		t.Fatal(err)
+	}
+	validator, err := acmevalidate.New(acmevalidate.Config{
+		Domain: "home.arpa", Subnet: netip.MustParsePrefix("192.0.2.0/24"),
+	}, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.s.validator = validator
+	for _, name := range []string{"ldap.home.arpa", "LDAP.HOME.ARPA."} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			f.s.newOrder(rec, f.request(t, map[string]any{"identifiers": []identifier{{Type: "dns", Value: name}}}), f.a.ID)
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "rejectedIdentifier") || len(f.s.state.Orders) != 0 {
+				t.Fatalf("built-in LDAP identity accepted: %d %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestOrderRestoresHistoricalLDAPIdentity(t *testing.T) {
+	t.Parallel()
+	f := setupOrders(t)
+	o := f.create(t, "ldap.home.arpa")
+	f.accept(t, o)
+	// Seed an issued LDAP record to represent state from before the service name
+	// was always reserved. Current client issuance must reject that identity.
+	cert, err := f.ca.GetLDAPCertificate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{DNSNames: []string{"ldap.home.arpa"}}, cert.PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certID, err := randomID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain := append(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Leaf.Raw}), f.ca.RootPEM()...)
+	o.Status, o.CertificateID, o.CSR, o.Expires = "valid", certID, csr, cert.Leaf.NotAfter
+	f.s.state.Orders[o.ID] = o
+	f.s.state.Certificates[certID] = certificate{
+		ID: certID, AccountID: f.a.ID, OrderID: o.ID, PEM: chain,
+		Serial: cert.Leaf.SerialNumber.String(), NotAfter: cert.Leaf.NotAfter,
+	}
+	if err := f.s.commit(f.s.state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.ca.SignCSR(csr, []string{"ldap.home.arpa"}); !errors.Is(err, pki.ErrInvalidCSR) {
+		t.Fatalf("reserved LDAP identity issuance: %v, want ErrInvalidCSR", err)
+	}
+	issued := f.s.state.Orders[o.ID]
+	restarted, err := New(f.s.cfg, f.ca, f.v, f.s.logger)
+	if err != nil {
+		t.Fatalf("restore pre-existing external LDAP certificate: %v", err)
+	}
+	restored := restarted.state.Orders[o.ID]
+	if restored.Status != "valid" || restored.CertificateID != issued.CertificateID {
+		t.Fatalf("restored LDAP certificate order = %+v, want issued order", restored)
+	}
+	leaf, err := parseLeaf(restarted.state.Certificates[restored.CertificateID].PEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := leaf.VerifyHostname("ldap.home.arpa"); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -101,6 +101,8 @@ func TestLookupIdentifierPolicy(t *testing.T) {
 		{name: "zone apex", identifier: "home.arpa"},
 		{name: "gateway", identifier: "GATEWAY.home.arpa."},
 		{name: "nameserver", identifier: "ns.home.arpa"},
+		{name: "LDAP service", identifier: "ldap.home.arpa"},
+		{name: "LDAP service canonical spelling", identifier: "LDAP.HOME.ARPA."},
 		{name: "external zone", identifier: "device.example.org"},
 		{name: "suffix confusion", identifier: "device.not-home.arpa"},
 		{name: "wildcard", identifier: "*.home.arpa"},

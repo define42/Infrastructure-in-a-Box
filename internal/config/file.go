@@ -149,6 +149,13 @@ func (settings *fileSettings) decode(data []byte) error {
 			return fmt.Errorf("duplicate configuration key %q", key)
 		}
 		seen[key] = true
+		if key == "ldap" {
+			settings.cfg.LDAP, err = decodeLDAP(decoder)
+			if err != nil {
+				return err
+			}
+			continue
+		}
 		if key == "a_records" {
 			settings.aRecords, err = decodeARecords(decoder)
 			if err != nil {
@@ -195,6 +202,7 @@ func (c Config) validatePaths(configPath string) error {
 		{name: "ca_dir", path: c.CADirectory},
 		{name: "CA certificate/key files", path: filepath.Join(c.CADirectory, "root-ca-bundle.pem")},
 		{name: "CA certificate/key files", path: filepath.Join(c.CADirectory, "gateway-bundle.pem")},
+		{name: "CA certificate/key files", path: filepath.Join(c.CADirectory, "ldap-bundle.pem")},
 		{name: "CA certificate/key files", path: filepath.Join(c.CADirectory, "root-ca.pem")},
 	}
 	for _, target := range protected {

@@ -399,3 +399,265 @@ func TestGetCertificateReportsPersistenceFailure(t *testing.T) {
 		t.Fatalf("GetCertificate() error = %v, want persistence failure", err)
 	}
 }
+
+func mustLDAPCertificate(t *testing.T, m *Manager) *tls.Certificate {
+	t.Helper()
+	cert, err := m.GetLDAPCertificate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
+}
+
+func TestGetLDAPCertificate(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig(t)
+	now := testClock()
+	m := mustOpen(t, cfg, now)
+	if _, err := os.Stat(filepath.Join(cfg.Directory, ldapBundleName)); !os.IsNotExist(err) {
+		t.Fatalf("LDAP bundle before first use: %v, want no file", err)
+	}
+	rootBundle := mustRead(t, cfg, rootBundleName)
+	gatewayBundle := mustRead(t, cfg, leafBundleName)
+	cert, err := m.GetLDAPCertificate(&tls.ClientHelloInfo{ServerName: "attacker.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(m.RootPEM()) {
+		t.Fatal("invalid public root")
+	}
+	for _, name := range []string{"ldap.home.arpa", cfg.ServerIP.String()} {
+		if _, err := cert.Leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: name, CurrentTime: now}); err != nil {
+			t.Errorf("verify LDAP certificate for %s: %v", name, err)
+		}
+	}
+	for _, name := range []string{"gateway.home.arpa", "attacker.example"} {
+		if err := cert.Leaf.VerifyHostname(name); err == nil {
+			t.Errorf("LDAP certificate verified for %s", name)
+		}
+	}
+	if _, err := cert.Leaf.Verify(x509.VerifyOptions{
+		Roots: roots, CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}); err == nil {
+		t.Error("LDAP certificate verified for client authentication")
+	}
+	if cert.Leaf.IsCA || !cert.Leaf.BasicConstraintsValid || cert.Leaf.KeyUsage != x509.KeyUsageDigitalSignature ||
+		!cert.Leaf.NotAfter.Equal(now.Add(leafLifetime)) || cert.Leaf.SerialNumber.Sign() <= 0 {
+		t.Fatal("invalid LDAP certificate constraints or lifetime")
+	}
+	if bytes.Equal(cert.Leaf.RawSubjectPublicKeyInfo, mustCertificate(t, m).Leaf.RawSubjectPublicKeyInfo) ||
+		bytes.Equal(cert.Leaf.RawSubjectPublicKeyInfo, m.root.Leaf.RawSubjectPublicKeyInfo) {
+		t.Error("LDAP certificate reuses the gateway or root key")
+	}
+	info, err := os.Stat(filepath.Join(cfg.Directory, ldapBundleName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("LDAP bundle permissions = %o, want 600", info.Mode().Perm())
+	}
+	ldapBundle := mustRead(t, cfg, ldapBundleName)
+	reopened := mustOpen(t, cfg, now.Add(time.Hour))
+	if !bytes.Equal(cert.Leaf.Raw, mustLDAPCertificate(t, reopened).Leaf.Raw) ||
+		!bytes.Equal(ldapBundle, mustRead(t, cfg, ldapBundleName)) {
+		t.Error("LDAP certificate changed on restart")
+	}
+	if !bytes.Equal(rootBundle, mustRead(t, cfg, rootBundleName)) ||
+		!bytes.Equal(gatewayBundle, mustRead(t, cfg, leafBundleName)) {
+		t.Error("LDAP certificate creation changed existing root or gateway state")
+	}
+}
+
+func TestGetLDAPCertificateRenews(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		elapsed time.Duration
+		change  func(*Config)
+	}{
+		{name: "near expiry", elapsed: 61 * 24 * time.Hour},
+		{name: "expired", elapsed: 91 * 24 * time.Hour},
+		{name: "domain changed", change: func(c *Config) { c.Domain = "office.test" }},
+		{name: "IP changed", change: func(c *Config) { c.ServerIP = netip.MustParseAddr("192.168.50.2") }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := testConfig(t)
+			now := testClock()
+			before := mustLDAPCertificate(t, mustOpen(t, cfg, now))
+			rootBundle := mustRead(t, cfg, rootBundleName)
+			if tt.change != nil {
+				tt.change(&cfg)
+			}
+			after := mustLDAPCertificate(t, mustOpen(t, cfg, now.Add(tt.elapsed)))
+			if bytes.Equal(before.Leaf.Raw, after.Leaf.Raw) ||
+				bytes.Equal(before.Leaf.RawSubjectPublicKeyInfo, after.Leaf.RawSubjectPublicKeyInfo) {
+				t.Error("LDAP certificate and key were not renewed")
+			}
+			for _, name := range []string{"ldap." + cfg.Domain, cfg.ServerIP.String()} {
+				if err := after.Leaf.VerifyHostname(name); err != nil {
+					t.Errorf("renewed LDAP certificate for %s: %v", name, err)
+				}
+			}
+			if !bytes.Equal(rootBundle, mustRead(t, cfg, rootBundleName)) {
+				t.Error("LDAP renewal changed the root CA")
+			}
+		})
+	}
+}
+
+func TestGetLDAPCertificateRejectsInvalidPrivateState(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		change func(*testing.T, Config)
+	}{
+		{name: "corrupt", change: func(t *testing.T, cfg Config) {
+			writeTestFile(t, cfg, ldapBundleName, []byte("corrupt LDAP certificate"))
+		}},
+		{name: "missing key", change: func(t *testing.T, cfg Config) {
+			cert, _ := pem.Decode(mustRead(t, cfg, ldapBundleName))
+			writeTestFile(t, cfg, ldapBundleName, pem.EncodeToMemory(cert))
+		}},
+		{name: "different signing CA", change: func(t *testing.T, cfg Config) {
+			other := testConfig(t)
+			mustLDAPCertificate(t, mustOpen(t, other, testClock()))
+			writeTestFile(t, cfg, ldapBundleName, mustRead(t, other, ldapBundleName))
+		}},
+		{name: "root used as leaf", change: func(t *testing.T, cfg Config) {
+			writeTestFile(t, cfg, ldapBundleName, mustRead(t, cfg, rootBundleName))
+		}},
+		{name: "exposed key", change: func(t *testing.T, cfg Config) {
+			if err := os.Chmod(filepath.Join(cfg.Directory, ldapBundleName), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "symlink", change: func(t *testing.T, cfg Config) {
+			path := filepath.Join(cfg.Directory, ldapBundleName)
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(cfg.Directory, leafBundleName), path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := testConfig(t)
+			mustLDAPCertificate(t, mustOpen(t, cfg, testClock()))
+			tt.change(t, cfg)
+			rootBundle := mustRead(t, cfg, rootBundleName)
+			gatewayBundle := mustRead(t, cfg, leafBundleName)
+			ldapBundle := mustRead(t, cfg, ldapBundleName)
+			// The LDAP bundle is loaded lazily. Its invalid private material is
+			// rejected each time LDAP initialization is tried.
+			m := mustOpen(t, cfg, testClock())
+			for range 2 {
+				if _, err := m.GetLDAPCertificate(nil); err == nil {
+					t.Fatal("invalid LDAP private state accepted")
+				}
+			}
+			if !bytes.Equal(rootBundle, mustRead(t, cfg, rootBundleName)) ||
+				!bytes.Equal(gatewayBundle, mustRead(t, cfg, leafBundleName)) ||
+				!bytes.Equal(ldapBundle, mustRead(t, cfg, ldapBundleName)) {
+				t.Error("failed LDAP initialization changed private material")
+			}
+		})
+	}
+}
+
+func TestGetLDAPCertificateRenewsConcurrently(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig(t)
+	now := testClock()
+	m, err := open(cfg, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := mustLDAPCertificate(t, m)
+	now = now.Add(61 * 24 * time.Hour)
+	const clients = 32
+	results := make(chan *tls.Certificate, clients)
+	var wg sync.WaitGroup
+	for range clients {
+		wg.Go(func() {
+			cert, err := m.GetLDAPCertificate(&tls.ClientHelloInfo{ServerName: "attacker.example"})
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			results <- cert
+			if _, err := m.GetCertificate(nil); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	close(results)
+	after := mustLDAPCertificate(t, m)
+	if bytes.Equal(before.Leaf.Raw, after.Leaf.Raw) {
+		t.Error("LDAP handshake callback did not renew expiring certificate")
+	}
+	if len(after.Leaf.DNSNames) != 1 || after.Leaf.DNSNames[0] != "ldap.home.arpa" {
+		t.Error("client hello changed the issued LDAP hostname")
+	}
+	for cert := range results {
+		if !bytes.Equal(cert.Leaf.Raw, after.Leaf.Raw) {
+			t.Error("concurrent LDAP handshakes received different renewed certificates")
+		}
+	}
+	if !bytes.Equal(after.Leaf.Raw, mustLDAPCertificate(t, mustOpen(t, cfg, now)).Leaf.Raw) {
+		t.Error("renewed LDAP certificate did not survive restart")
+	}
+}
+
+func TestGetLDAPCertificateCapsValidityAtRootExpiry(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig(t)
+	now := testClock()
+	m, err := open(cfg, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootBundle := mustRead(t, cfg, rootBundleName)
+	rootExpiry := now.AddDate(10, 0, 0)
+	now = rootExpiry.Add(-5 * 24 * time.Hour)
+	cert := mustLDAPCertificate(t, m)
+	if !cert.Leaf.NotAfter.Equal(rootExpiry) {
+		t.Fatalf("LDAP expiry = %s, root expiry = %s", cert.Leaf.NotAfter, rootExpiry)
+	}
+	if !bytes.Equal(cert.Leaf.Raw, mustLDAPCertificate(t, m).Leaf.Raw) {
+		t.Error("LDAP certificate capped at root expiry was renewed repeatedly")
+	}
+	now = rootExpiry
+	if _, err := m.GetLDAPCertificate(nil); err == nil {
+		t.Error("expired root accepted during LDAP handshake")
+	}
+	if !bytes.Equal(rootBundle, mustRead(t, cfg, rootBundleName)) {
+		t.Error("expired root was silently replaced")
+	}
+}
+
+func TestGetLDAPCertificateReportsPersistenceFailure(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig(t)
+	now := testClock()
+	m, err := open(cfg, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustLDAPCertificate(t, m)
+	path := filepath.Join(cfg.Directory, ldapBundleName)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(61 * 24 * time.Hour)
+	if _, err := m.GetLDAPCertificate(nil); err == nil || !strings.Contains(err.Error(), "persist") {
+		t.Fatalf("GetLDAPCertificate() error = %v, want persistence failure", err)
+	}
+}

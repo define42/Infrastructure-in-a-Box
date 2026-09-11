@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
@@ -52,7 +53,11 @@ func TestNewGatewayInitializesCAAndACME(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		server, err := newGateway(cfg, leases, logger)
+		ca, err := newCA(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		server, err := newGateway(cfg, ca, leases, logger)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -86,6 +91,9 @@ func TestNewGatewayInitializesCAAndACME(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(caDir, name)); err != nil {
 			t.Errorf("missing persistent %s: %v", name, err)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(caDir, "ldap-bundle.pem")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("gateway initialization created unused LDAP certificate state: %v", err)
 	}
 	if current, err := os.ReadFile(configPath); err != nil || !bytes.Equal(current, data) {
 		t.Fatalf("startup modified configuration: %v", err)
@@ -162,6 +170,85 @@ func TestDNSOverridesAtStartup(t *testing.T) {
 	}
 	if cfg.ARecords["printer.home.arpa."] != netip.MustParseAddr("192.168.50.10") {
 		t.Fatal("static address changed during DHCP registration")
+	}
+}
+
+func TestLDAPStartup(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		ldap map[string]any
+	}{
+		{name: "omitted LDAP"},
+		{name: "empty LDAP", ldap: map[string]any{}},
+		{name: "configured directory", ldap: map[string]any{"base_dn": "dc=example,dc=org"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			settings := map[string]any{
+				"interface": "eth0", "server_ip": "192.168.50.2",
+				"subnet": "192.168.50.0/24", "pool_start": "192.168.50.100",
+				"pool_end": "192.168.50.200", "ca_dir": "pki", "lease_file": "",
+			}
+			if tc.ldap != nil {
+				settings["ldap"] = tc.ldap
+			}
+			data, err := json.Marshal(settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "config.json")
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ca, err := newCA(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			server, err := newLDAP(cfg, ca, logger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if server == nil {
+				t.Fatal("LDAP must always be initialized")
+			}
+			if _, err := os.Stat(filepath.Join(cfg.CADirectory, "ldap-bundle.pem")); err != nil {
+				t.Fatal(err)
+			}
+			cert, err := ca.GetLDAPCertificate(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			roots := x509.NewCertPool()
+			if !roots.AppendCertsFromPEM(ca.RootPEM()) {
+				t.Fatal("invalid public CA")
+			}
+			for _, name := range []string{"ldap.home.arpa", cfg.ServerIP.String()} {
+				if _, err := cert.Leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: name}); err != nil {
+					t.Fatalf("LDAP certificate verification for %s: %v", name, err)
+				}
+			}
+			if cfg.LDAP.Listen != "192.168.50.2:389" || cfg.LDAP.TLSListen != "192.168.50.2:636" {
+				t.Fatalf("unexpected LDAP endpoints: %s, %s", cfg.LDAP.Listen, cfg.LDAP.TLSListen)
+			}
+			if cfg.ARecords["ldap.home.arpa."] != cfg.ServerIP {
+				t.Fatal("LDAP hostname does not resolve to server IP")
+			}
+			leases, err := newLeaseManager(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assigned, err := leases.Commit("client", cfg.PoolStart, "ldap")
+			if err != nil || assigned.Hostname != "" {
+				t.Fatalf("DHCP client claimed LDAP name: %+v, %v", assigned, err)
+			}
+		})
 	}
 }
 
