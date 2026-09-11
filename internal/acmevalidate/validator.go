@@ -153,7 +153,7 @@ func (v *Validator) Validate(ctx context.Context, name, token, keyAuthorization 
 	if err != nil {
 		return Target{}, fmt.Errorf("%w: fetch challenge on TCP port 80: %w", ErrChallengeFailed, err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		return Target{}, fmt.Errorf("%w: HTTP status %d (redirects are not followed)", ErrChallengeFailed, response.StatusCode)
 	}

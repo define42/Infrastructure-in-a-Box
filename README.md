@@ -283,5 +283,15 @@ ports, so they can run without root or changing your network configuration.
 HTTPS tests trust only their generated private root and verify the real TLS
 handshake and certificate downloads.
 
-The Makefile provides `make build`, `make test`, `make integration`, and
-`make vet`; `make check` runs all checks. The binary is written to `bin/infra-box`.
+The Makefile provides `make build`, `make test`, `make integration`, `make vet`,
+and `make lint`; `make check` runs all of them except the build. The binary is
+written to `bin/infra-box`. `make lint` runs the pinned golangci-lint version and
+checks formatting; its first run downloads the lint tool. If that version is
+already installed, use `make lint GOLANGCI_LINT=golangci-lint`.
+
+[GitHub Actions](.github/workflows/ci.yml) runs on pushes, pull requests, and
+manual dispatch. It builds the application and runs both test suites with race
+detection, shuffled order, and test caching disabled. A separate lint job checks
+module consistency, `go vet`, golangci-lint (including integration tests), Go
+formatting, and known vulnerabilities with `govulncheck`. The workflow uses the
+latest Go 1.26 patch release and read-only repository permissions.

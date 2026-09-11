@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -346,17 +347,27 @@ func TestThumbprintRejectsUnsafeKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	invalidPoint := func(x, y *big.Int) jose.JSONWebKey {
+		return jose.JSONWebKey{Key: &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}} //nolint:staticcheck // Malformed points cannot be constructed through the parsing APIs.
+	}
 	for _, tc := range []struct {
 		name string
 		key  jose.JSONWebKey
 	}{
 		{"nil", jose.JSONWebKey{}},
 		{"typed nil", jose.JSONWebKey{Key: (*ecdsa.PublicKey)(nil)}},
+		{"nil curve", jose.JSONWebKey{Key: &ecdsa.PublicKey{}}},
+		{"nil coordinates", jose.JSONWebKey{Key: &ecdsa.PublicKey{Curve: elliptic.P256()}}},
+		{"nil X", invalidPoint(nil, big.NewInt(1))},
+		{"nil Y", invalidPoint(big.NewInt(1), nil)},
+		{"unsupported curve", jose.JSONWebKey{Key: &ecdsa.PublicKey{Curve: elliptic.P224()}}},
 		{"private", jose.JSONWebKey{Key: key}},
 		{"symmetric", jose.JSONWebKey{Key: []byte("secret")}},
 		{"weak RSA", jose.JSONWebKey{Key: &smallRSA.PublicKey}},
 		{"wrong use", jose.JSONWebKey{Key: &key.PublicKey, Use: "enc"}},
-		{"invalid curve point", jose.JSONWebKey{Key: &ecdsa.PublicKey{Curve: elliptic.P256(), X: key.X, Y: smallRSA.N}}},
+		{"invalid curve point", invalidPoint(big.NewInt(1), big.NewInt(1))},
+		{"negative coordinate", invalidPoint(big.NewInt(-1), big.NewInt(1))},
+		{"oversized coordinate", invalidPoint(smallRSA.N, big.NewInt(1))},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := Thumbprint(tc.key); err == nil {

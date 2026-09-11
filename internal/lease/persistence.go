@@ -34,7 +34,7 @@ func (m *Manager) restore() error {
 	if err != nil {
 		return fmt.Errorf("open lease file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var saved persistedState
 	dec := json.NewDecoder(f)
@@ -120,8 +120,9 @@ func (m *Manager) persist(next state) error {
 	if err != nil {
 		return fmt.Errorf("create temporary lease file: %w", err)
 	}
-	defer os.Remove(tmp.Name())
-	defer tmp.Close()
+	// Cleanup is best effort; the write, sync, and close below are checked.
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	defer func() { _ = tmp.Close() }()
 	enc := json.NewEncoder(tmp)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(saved); err != nil {

@@ -63,7 +63,7 @@ func (v *loopbackHTTPValidator) Validate(ctx context.Context, name, token, autho
 	if err != nil {
 		return acmevalidate.Target{}, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 4097))
 	if err != nil {
 		return acmevalidate.Target{}, err
@@ -318,7 +318,7 @@ func fetchIntegrationCRL(t *testing.T, ctx context.Context, client *http.Client,
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
 		t.Fatal(err)

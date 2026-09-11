@@ -275,9 +275,14 @@ func validPublicKey(jwk jose.JSONWebKey) bool {
 	}
 	switch key := jwk.Key.(type) {
 	case *ecdsa.PublicKey:
-		return key != nil && key.X != nil && key.Y != nil &&
-			(key.Curve == elliptic.P256() || key.Curve == elliptic.P384() || key.Curve == elliptic.P521()) &&
-			key.Curve.IsOnCurve(key.X, key.Y)
+		if key == nil || (key.Curve != elliptic.P256() && key.Curve != elliptic.P384() && key.Curve != elliptic.P521()) {
+			return false
+		}
+		if key.X == nil || key.Y == nil { //nolint:staticcheck // PublicKey.Bytes panics on nil coordinates in Go 1.26.
+			return false
+		}
+		_, err := key.Bytes()
+		return err == nil
 	case *rsa.PublicKey:
 		return key != nil && key.N != nil && key.N.Sign() > 0 && key.N.BitLen() >= 2048 &&
 			key.N.BitLen() <= 8192 && key.N.Bit(0) == 1 && key.E >= 3 && key.E <= 1<<31-1 && key.E%2 == 1

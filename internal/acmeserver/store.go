@@ -34,7 +34,7 @@ func (s *Server) restore() error {
 	if err != nil {
 		return fmt.Errorf("open ACME state: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var loaded state
 	dec := json.NewDecoder(io.LimitReader(f, 64<<20+1))
 	dec.DisallowUnknownFields()
@@ -179,8 +179,9 @@ func (s *Server) commit(next state) error {
 	if err != nil {
 		return fmt.Errorf("create ACME state snapshot: %w", err)
 	}
-	defer os.Remove(f.Name())
-	defer f.Close()
+	// Cleanup is best effort; the write, sync, and close below are checked.
+	defer func() { _ = os.Remove(f.Name()) }()
+	defer func() { _ = f.Close() }()
 	if _, err := f.Write(data); err != nil {
 		return fmt.Errorf("write ACME state: %w", err)
 	}
@@ -200,7 +201,7 @@ func (s *Server) commit(next state) error {
 	if err != nil {
 		return fmt.Errorf("open ACME directory: %w", err)
 	}
-	defer d.Close()
+	defer func() { _ = d.Close() }()
 	if err := d.Sync(); err != nil {
 		return fmt.Errorf("sync ACME directory: %w", err)
 	}

@@ -140,12 +140,12 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		return fmt.Errorf("listen for HTTPS gateway: %w", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	return s.serve(ctx, listener)
 }
 
 func (s *Server) serve(ctx context.Context, listener net.Listener) error {
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	server := &http.Server{

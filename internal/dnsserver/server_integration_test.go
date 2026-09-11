@@ -45,7 +45,7 @@ func TestRunStartupFailureClosesSiblingIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer udp.Close()
+	defer func() { _ = udp.Close() }()
 	config := testConfig()
 	config.Address = udp.LocalAddr().String()
 	server := newTestServer(t, config)
@@ -56,7 +56,7 @@ func TestRunStartupFailureClosesSiblingIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TCP listener leaked after UDP startup failure: %v", err)
 	}
-	tcp.Close()
+	_ = tcp.Close()
 }
 
 func TestForwardingIntegration(t *testing.T) {
@@ -190,7 +190,8 @@ func TestCancelInterruptsForwardingIntegration(t *testing.T) {
 	go func() {
 		defer close(queryDone)
 		client := dns.Client{Net: "udp", Timeout: time.Second}
-		client.Exchange(new(dns.Msg).SetQuestion("pending.example.", dns.TypeA), tcp.Addr().String())
+		// Cancellation may interrupt this query; only shutdown completion matters.
+		_, _, _ = client.Exchange(new(dns.Msg).SetQuestion("pending.example.", dns.TypeA), tcp.Addr().String())
 	}()
 	select {
 	case <-received:
@@ -364,12 +365,12 @@ func listenPair(t *testing.T) (net.Listener, net.PacketConn) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { tcp.Close() })
+	t.Cleanup(func() { _ = tcp.Close() })
 	udp, err := net.ListenPacket("udp4", tcp.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { udp.Close() })
+	t.Cleanup(func() { _ = udp.Close() })
 	return tcp, udp
 }
 

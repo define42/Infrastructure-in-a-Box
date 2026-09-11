@@ -80,7 +80,7 @@ func TestTrustedHTTPSAndDownloadsIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		body, err := io.ReadAll(response.Body)
-		response.Body.Close()
+		_ = response.Body.Close()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -108,7 +108,7 @@ func TestTrustedHTTPSAndDownloadsIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gateway IP SAN: %v", err)
 	}
-	conn.Close()
+	_ = conn.Close()
 	cancel()
 	select {
 	case err := <-done:
@@ -119,7 +119,7 @@ func TestTrustedHTTPSAndDownloadsIntegration(t *testing.T) {
 		t.Fatal("gateway did not stop after cancellation")
 	}
 	if connection, err := net.DialTimeout("tcp", address, 200*time.Millisecond); err == nil {
-		connection.Close()
+		_ = connection.Close()
 		t.Error("gateway listener stayed open after shutdown")
 	}
 }
@@ -142,7 +142,7 @@ func TestHTTPSRejectsInvalidTrustAndOldTLSIntegration(t *testing.T) {
 			t.Parallel()
 			conn, err := tls.DialWithDialer(&net.Dialer{Timeout: time.Second}, "tcp", address, test.tls)
 			if err == nil {
-				conn.Close()
+				_ = conn.Close()
 				t.Fatal("TLS accepted invalid trust or protocol")
 			}
 			if test.name == "unknown root" {
@@ -167,7 +167,7 @@ func TestRunListenerFailureIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	server := testServer(t, testPKI(t))
 	server.config.Address = listener.Addr().String()
 	if err := server.Run(t.Context()); err == nil || !strings.Contains(err.Error(), "listen for HTTPS") {
@@ -181,7 +181,7 @@ func TestServeListenerFailureIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	listener.Close()
+	_ = listener.Close()
 	server := testServer(t, testPKI(t))
 	if err := server.serve(t.Context(), listener); err == nil || !strings.Contains(err.Error(), "serve HTTPS") {
 		t.Fatalf("serve error = %v", err)
@@ -194,7 +194,7 @@ func TestCancelBeforeServingIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	server := testServer(t, testPKI(t))
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -209,7 +209,7 @@ func TestCancelBeforeServingIntegration(t *testing.T) {
 		t.Fatal("cancellation before ServeTLS did not stop the server")
 	}
 	if conn, err := net.DialTimeout("tcp", listener.Addr().String(), 200*time.Millisecond); err == nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Error("listener stayed open after cancellation before ServeTLS")
 	}
 }

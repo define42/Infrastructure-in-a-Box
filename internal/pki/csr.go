@@ -114,7 +114,10 @@ func validateCSRKey(key crypto.PublicKey) error {
 		if key == nil || (key.Curve != elliptic.P256() && key.Curve != elliptic.P384() && key.Curve != elliptic.P521()) {
 			return errors.New("CSR requires ECDSA P-256, P-384, or P-521")
 		}
-		if key.X == nil || key.Y == nil || !key.Curve.IsOnCurve(key.X, key.Y) {
+		if key.X == nil || key.Y == nil { //nolint:staticcheck // PublicKey.Bytes panics on nil coordinates in Go 1.26.
+			return errors.New("CSR contains an invalid ECDSA point")
+		}
+		if _, err := key.Bytes(); err != nil {
 			return errors.New("CSR contains an invalid ECDSA point")
 		}
 	case ed25519.PublicKey:

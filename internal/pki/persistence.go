@@ -69,8 +69,9 @@ func writeFile(dir, name string, data []byte, mode os.FileMode, exclusive bool) 
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
-	defer tmp.Close()
+	// Cleanup is best effort; the write, sync, and close below are checked.
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	defer func() { _ = tmp.Close() }()
 	if err := tmp.Chmod(mode); err != nil {
 		return err
 	}
@@ -98,6 +99,6 @@ func writeFile(dir, name string, data []byte, mode os.FileMode, exclusive bool) 
 	if err != nil {
 		return err
 	}
-	defer directory.Close()
+	defer func() { _ = directory.Close() }()
 	return directory.Sync()
 }

@@ -141,13 +141,13 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listen for TCP DNS: %w", err)
 	}
-	defer tcp.Close()
+	defer func() { _ = tcp.Close() }()
 	// Reuse the selected TCP port when Address requests an ephemeral port.
 	udp, err := listenConfig.ListenPacket(ctx, "udp", tcp.Addr().String())
 	if err != nil {
 		return fmt.Errorf("listen for UDP DNS: %w", err)
 	}
-	defer udp.Close()
+	defer func() { _ = udp.Close() }()
 	return s.serve(ctx, tcp, udp)
 }
 
@@ -390,10 +390,10 @@ func (s *Server) exchange(ctx context.Context, client *dns.Client, query *dns.Ms
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	// miekg/dns applies context deadlines to I/O, but an earlier cancellation
 	// does not interrupt an existing read unless its connection is closed.
-	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
 	answer, _, err := client.ExchangeWithConnContext(ctx, query, conn)
 	return answer, err

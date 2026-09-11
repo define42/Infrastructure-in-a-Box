@@ -29,12 +29,12 @@ func TestServeDHCPWireLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { listener.Close() })
+	t.Cleanup(func() { _ = listener.Close() })
 	client, err := net.Dial("udp4", listener.LocalAddr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { client.Close() })
+	t.Cleanup(func() { _ = client.Close() })
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- s.Serve(ctx, routeReply{listener, client.LocalAddr()}) }()
