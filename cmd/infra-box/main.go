@@ -1,0 +1,102 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/netip"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/define42/Infrastructure-in-a-Box/internal/config"
+	"github.com/define42/Infrastructure-in-a-Box/internal/dhcpserver"
+	"github.com/define42/Infrastructure-in-a-Box/internal/dnsserver"
+	"github.com/define42/Infrastructure-in-a-Box/internal/lease"
+)
+
+func main() {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	if err := run(logger); err != nil {
+		logger.Error("server stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run(logger *slog.Logger) error {
+	cfg, err := config.Parse(os.Args[1:], os.Stderr)
+	if errors.Is(err, flag.ErrHelp) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := checkInterface(cfg.Interface, cfg.ServerIP); err != nil {
+		return err
+	}
+	leases, err := lease.New(lease.Config{
+		PoolStart: cfg.PoolStart, PoolEnd: cfg.PoolEnd, Domain: cfg.Domain,
+		LeaseDuration: cfg.LeaseDuration, File: cfg.LeaseFile,
+	})
+	if err != nil {
+		return fmt.Errorf("initialize leases: %w", err)
+	}
+	dhcp, err := dhcpserver.New(dhcpserver.Config{
+		Interface: cfg.Interface, Address: cfg.DHCPAddress, ServerIP: cfg.ServerIP,
+		Subnet: cfg.Subnet, Router: cfg.Router, Domain: cfg.Domain, LeaseDuration: cfg.LeaseDuration,
+	}, leases, logger)
+	if err != nil {
+		return err
+	}
+	dns, err := dnsserver.New(dnsserver.Config{
+		Address: cfg.DNSAddress, Domain: cfg.Domain, ServerIP: cfg.ServerIP,
+		Subnet: cfg.Subnet, Upstream: cfg.Upstream, TTL: cfg.DNSTTL,
+	}, leases, logger)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return serve(ctx, dhcp.Run, dns.Run)
+}
+
+// serve waits for both services and cancels the sibling on any service exit.
+func serve(ctx context.Context, runners ...func(context.Context) error) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan error, len(runners))
+	for _, run := range runners {
+		go func() { results <- run(ctx) }()
+	}
+	var result error
+	for range runners {
+		err := <-results
+		cancel()
+		result = errors.Join(result, err)
+	}
+	return result
+}
+
+func checkInterface(name string, serverIP netip.Addr) error {
+	iface, err := net.InterfaceByName(name)
+	if err != nil {
+		return fmt.Errorf("find DHCP interface: %w", err)
+	}
+	if iface.Flags&net.FlagUp == 0 {
+		return fmt.Errorf("interface %s is down", name)
+	}
+	addresses, err := iface.Addrs()
+	if err != nil {
+		return fmt.Errorf("read interface addresses: %w", err)
+	}
+	for _, address := range addresses {
+		prefix, err := netip.ParsePrefix(address.String())
+		if err == nil && prefix.Addr().Unmap() == serverIP {
+			return nil
+		}
+	}
+	return fmt.Errorf("server IP %s must be statically configured on interface %s", serverIP, name)
+}

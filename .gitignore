@@ -1,0 +1,4 @@
+/bin/
+/leases.json
+/leases.json.*
+/coverage.out
