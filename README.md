@@ -524,6 +524,14 @@ HTTP at `http://gateway.home.arpa/` or `http://192.168.50.2/`. HTTP and HTTPS ru
 simultaneously on ports 80 and 443, respectively; HTTP requests are served
 directly without redirecting to HTTPS. The ACME API requires HTTPS.
 
+DHCP advertises the public root CA URL `http://<server_ip>/ca.pem` in option
+**43 — Vendor Specific Information**, for example `http://192.168.50.2/ca.pem`.
+The option contains the URL as raw ASCII bytes, without suboptions or a trailing
+NUL. It is included in OFFER and ACK replies, including renewals and INFORM
+responses, even when clients do not request option 43. Clients must explicitly
+support this convention to discover the URL; it does not install or trust the
+certificate automatically.
+
 The gateway page displays the root certificate's SHA-256 fingerprint and offers:
 
 | URL | Download |

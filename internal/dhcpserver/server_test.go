@@ -114,6 +114,51 @@ func TestHandleLeaseLifecycle(t *testing.T) {
 	}
 }
 
+func TestRootCAAdvertisement(t *testing.T) {
+	t.Parallel()
+	for _, serverIP := range []string{"192.168.50.1", "192.168.50.2"} {
+		t.Run(serverIP, func(t *testing.T) {
+			t.Parallel()
+			s, manager := testServer(t, "")
+			cfg := s.config
+			cfg.ServerIP = netip.MustParseAddr(serverIP)
+			s, err := New(cfg, manager, s.logger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			check := func(reply *dhcpv4.DHCPv4) {
+				t.Helper()
+				want := "http://" + serverIP + "/ca.pem"
+				if got := string(reply.Options.Get(dhcpv4.OptionVendorSpecificInformation)); got != want {
+					t.Fatalf("%s option 43 = %q, want %q", reply.MessageType(), got, want)
+				}
+			}
+			// Advertise even when option 43 is absent from the parameter request list.
+			offer := handle(t, s, packet(t, dhcpv4.MessageTypeDiscover, 1), dhcpv4.MessageTypeOffer)
+			check(offer)
+			request := packet(t, dhcpv4.MessageTypeRequest, 1,
+				dhcpv4.WithOption(dhcpv4.OptRequestedIPAddress(offer.YourIPAddr)),
+				dhcpv4.WithOption(dhcpv4.OptServerIdentifier(offer.ServerIdentifier())),
+			)
+			check(handle(t, s, request, dhcpv4.MessageTypeAck))
+			renewal := packet(t, dhcpv4.MessageTypeRequest, 1, dhcpv4.WithClientIP(offer.YourIPAddr))
+			check(handle(t, s, renewal, dhcpv4.MessageTypeAck))
+			inform := packet(t, dhcpv4.MessageTypeInform, 2,
+				dhcpv4.WithClientIP(net.IPv4(192, 168, 50, 200)),
+				dhcpv4.WithRequestedOptions(dhcpv4.OptionVendorSpecificInformation),
+			)
+			check(handle(t, s, inform, dhcpv4.MessageTypeAck))
+			conflict := packet(t, dhcpv4.MessageTypeRequest, 2,
+				dhcpv4.WithOption(dhcpv4.OptRequestedIPAddress(offer.YourIPAddr)),
+			)
+			nak := handle(t, s, conflict, dhcpv4.MessageTypeNak)
+			if nak.Options.Has(dhcpv4.OptionVendorSpecificInformation) {
+				t.Fatal("NAK must not advertise the root CA URL")
+			}
+		})
+	}
+}
+
 func TestHandleMissingHostname(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

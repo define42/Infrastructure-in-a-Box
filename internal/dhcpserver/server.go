@@ -224,6 +224,10 @@ func (s *Server) reply(request *dhcpv4.DHCPv4, kind dhcpv4.MessageType, allocati
 			dhcpv4.WithNetmask(net.CIDRMask(s.config.Subnet.Bits(), 32)),
 			dhcpv4.WithDNS(net.IP(s.config.ServerIP.AsSlice())),
 			dhcpv4.WithOption(dhcpv4.OptNTPServers(net.IP(s.config.ServerIP.AsSlice()))),
+			// Option 43 carries the raw root CA URL; HTTP on the server IP works before DNS or CA trust is set up.
+			dhcpv4.WithOption(dhcpv4.OptGeneric(
+				dhcpv4.OptionVendorSpecificInformation, []byte("http://"+s.config.ServerIP.String()+"/ca.pem"),
+			)),
 			dhcpv4.WithOption(dhcpv4.OptDomainName(s.config.Domain)),
 			dhcpv4.WithDomainSearchList(s.config.Domain),
 		)

@@ -85,6 +85,9 @@ func TestServeDHCPWireLifecycle(t *testing.T) {
 		t.Fatal("REQUEST did not acknowledge offered address")
 	}
 	for _, reply := range []*dhcpv4.DHCPv4{offer, ack} {
+		if got := string(reply.Options.Get(dhcpv4.OptionVendorSpecificInformation)); got != "http://192.168.50.1/ca.pem" {
+			t.Fatalf("wire exchange advertised incorrect root CA URL: %q", got)
+		}
 		if servers := reply.NTPServers(); len(servers) != 1 || ipv4(servers[0]) != s.config.ServerIP {
 			t.Fatalf("wire exchange advertised incorrect NTP servers: %v", servers)
 		}
