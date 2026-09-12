@@ -32,13 +32,20 @@ func TestNewGatewayInitializesCAAndACME(t *testing.T) {
 		"pool_end": "192.168.50.20",
 		"lease_duration": "1h",
 		"lease_file": "state/leases.json",
-		"ca_dir": "state/pki"
+		"ca_dir": "state/pki",
+ "tftp_root": "assets/pxe"
 	}`)
 	if err := os.WriteFile(configPath, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := config.Parse([]string{"-config", configPath}, io.Discard)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cfg.TFTPDirectory, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.TFTPDirectory, "bootx64.efi"), []byte("boot image"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	leases, err := newLeaseManager(cfg)
@@ -73,6 +80,11 @@ func TestNewGatewayInitializesCAAndACME(t *testing.T) {
 		}
 		if directory["newAccount"] != "https://gateway.home.arpa/acme/new-account" {
 			t.Errorf("ACME directory = %v", directory)
+		}
+		response = httptest.NewRecorder()
+		server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/boot/bootx64.efi", nil))
+		if response.Code != 200 || response.Body.String() != "boot image" {
+			t.Fatalf("configured TFTP root was not exposed: %d %s", response.Code, response.Body.String())
 		}
 		response = httptest.NewRecorder()
 		server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/ca.pem", nil))

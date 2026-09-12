@@ -48,6 +48,7 @@ func TestTrustedHTTPSAndDownloadsIntegration(t *testing.T) {
 	t.Parallel()
 	manager := testPKI(t)
 	server := testServer(t, manager)
+	server.config.BootDirectory = bootTestDirectory(t)
 	var handshakes atomic.Int32
 	server.getCertificate = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 		handshakes.Add(1)
@@ -74,6 +75,7 @@ func TestTrustedHTTPSAndDownloadsIntegration(t *testing.T) {
 	}{
 		{"/ca.pem", manager.RootPEM()},
 		{"/ca.crt", root.Bytes},
+		{"/boot/bootx64.efi", []byte("0123456789abcdef")},
 	} {
 		response, err := client.Get("https://gateway.home.arpa" + download.path)
 		if err != nil {

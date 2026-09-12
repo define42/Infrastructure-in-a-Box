@@ -119,6 +119,7 @@ func TestLoadDefaults(t *testing.T) {
 		LeaseDuration: 12 * time.Hour,
 		LeaseFile:     filepath.Join(dir, "leases.json"),
 		DNSTTL:        time.Minute,
+		HTTPAddress:   "192.168.50.2:80",
 		HTTPSAddress:  "192.168.50.2:443",
 		TFTPAddress:   "192.168.50.2:69",
 		TFTPDirectory: filepath.Join(dir, "tftp"),
@@ -181,6 +182,9 @@ func TestLoadListenerAddressesFollowServerIP(t *testing.T) {
 			}
 			if want := tc.serverIP + ":53"; cfg.DNSAddress != want {
 				t.Errorf("DNSAddress = %q, want %q", cfg.DNSAddress, want)
+			}
+			if want := tc.serverIP + ":80"; cfg.HTTPAddress != want {
+				t.Errorf("HTTPAddress = %q, want %q", cfg.HTTPAddress, want)
 			}
 			if want := tc.serverIP + ":443"; cfg.HTTPSAddress != want {
 				t.Errorf("HTTPSAddress = %q, want %q", cfg.HTTPSAddress, want)

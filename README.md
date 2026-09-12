@@ -19,7 +19,7 @@ users through LDAP.
 | TFTP and PXE | Read-only boot files with DHCP selecting the BIOS or x64 EFI loader from client architecture option 93. |
 | DNS | Local names and reverse lookups for active DHCP leases, static and wildcard A records, and optional forwarding to an upstream resolver. |
 | Private CA and ACME | Certificates for active DHCP hostnames through ACME HTTP-01, plus certificates for the built-in HTTPS and LDAPS services. |
-| HTTPS gateway | A page for downloading the public root CA and checking its fingerprint, plus the ACME API. |
+| HTTP and HTTPS gateway | A page for downloading the public root CA and checking its fingerprint, plus read-only boot files. The ACME API uses HTTPS. |
 | LDAP and LDAPS | Password authentication and a read-only directory of configured users and groups. |
 
 For example, a laptop joining the network can receive `192.168.50.100` and
@@ -45,7 +45,7 @@ Read on for [getting started](#getting-started), [configuration](#configuration)
 [DHCP and DNS behavior](#lease-and-dns-behavior),
 [PXE network boot](#pxe-network-boot),
 [static DNS records](#static-dns-a-records),
-[the private CA](#https-gateway-and-private-ca),
+[the private CA](#http-and-https-gateway-and-private-ca),
 [ACME certificates](#acme-certificates-with-http-01),
 [LDAP users and groups](#ldap-users-and-groups), and
 [contributing](#contributing).
@@ -118,13 +118,15 @@ suitable operating-system capabilities. Permit client traffic to these ports:
 | DHCP | `:67` on the configured interface | UDP |
 | DNS | `<server_ip>:53` | UDP and TCP |
 | TFTP | `<server_ip>:69` | UDP; each transfer uses an additional ephemeral UDP port |
+| HTTP gateway | `<server_ip>:80` | TCP |
 | HTTPS gateway and ACME | `<server_ip>:443` | TCP |
 | LDAP | `<server_ip>:389` | Plaintext TCP |
 | LDAPS | `<server_ip>:636` | TLS over TCP |
 
 All services start together, including both LDAP listeners even when no users
 are configured. TFTP is always enabled, including when its root directory is
-empty. DNS, TFTP, HTTPS, LDAP, and LDAPS ports are fixed. Configuration
+empty. Both HTTP and HTTPS are always enabled. DNS, TFTP, HTTP, HTTPS, LDAP,
+and LDAPS ports are fixed. Configuration
 changes take effect after a restart.
 
 ### Check a client lease
@@ -139,7 +141,7 @@ dig +tcp @192.168.50.2 laptop.home.arpa A
 ```
 
 For HTTPS and LDAPS, first [obtain and trust the public root
-CA](#https-gateway-and-private-ca). You can then visit
+CA](#http-and-https-gateway-and-private-ca). You can then visit
 `https://gateway.home.arpa/`, configure an
 [ACME client](#acme-certificates-with-http-01), or enable
 [LDAP accounts](#ldap-users-and-groups).
@@ -200,8 +202,9 @@ with `-config /path/to/config.json`. Keep existing state paths absolute, or
 adjust relative paths for the configuration file's location, so the server
 continues using the same leases, CA, and ACME state.
 
-DNS always listens on `<server_ip>:53` for UDP and TCP, and HTTPS always listens
-on `<server_ip>:443`. Remove `dns_listen` and `https_listen` from older
+DNS always listens on `<server_ip>:53` for UDP and TCP. The gateway always listens
+on `<server_ip>:80` for HTTP and `<server_ip>:443` for HTTPS. Ensure both TCP ports
+are available when upgrading. Remove `dns_listen` and `https_listen` from older
 configuration files; those keys are no longer accepted. The DHCP listener
 accepts `:port`, `0.0.0.0:port`, or `<server_ip>:port`. Alternate DHCP ports
 support development, but normal DHCP clients expect port 67. Hostname-based upstream
@@ -243,7 +246,7 @@ networks; avoid `.local`, which is reserved for
   retain the previous registration.
   A persisted lease named `gateway.<domain>` from an older version retains its
   address and expiry on upgrade, but loses that hostname so it cannot replace
-  the HTTPS gateway's DNS record.
+  the gateway's DNS record.
 - Lease state is saved on changes and restored at startup, including DNS names
   for leases that are still valid. Keep the lease file across restarts to avoid
   reallocating addresses that clients may still be using. In-memory operation
@@ -251,7 +254,8 @@ networks; avoid `.local`, which is reserved for
   atomic file replacement; a failed write prevents the corresponding lease
   change from being acknowledged. Only one process may own a lease file.
 - Interrupt or terminate the process with SIGINT or SIGTERM to stop DHCP, DNS,
-  HTTPS, and LDAP together. A listener failure also stops the other services.
+  TFTP, HTTP, HTTPS, LDAP, and LDAPS together. A listener failure also stops the
+  other services.
 
 This implementation serves one IPv4 subnet and one address pool. It does not
 provide DHCPv6, static reservations, dynamic DNS UPDATE, DNSSEC validation, or
@@ -354,7 +358,19 @@ dig +tcp @192.168.50.2 www.google.com A
 ### PXE network boot
 
 The always-enabled TFTP server listens on `<server_ip>:69` and serves files
-beneath `tftp_root`. Relative paths resolve beside the JSON configuration file;
+beneath `tftp_root`. The same directory is exposed read-only by the HTTP and HTTPS
+gateway at `http://gateway.<domain>/boot/` and `https://gateway.<domain>/boot/`,
+with directory browsing, HEAD, and byte-range downloads. For example,
+`bootx64.efi` is also available at `http://192.168.50.2/boot/bootx64.efi`.
+HTTP serves files directly without redirecting to HTTPS. All three protocols
+see file updates without a restart. HTTPS clients must trust the private root CA.
+
+For stock Slax, place the ISO at `tftp_root/slax/slax.iso` and use
+`from=http://192.168.50.2/boot/slax/slax.iso` in the kernel command line. Use a
+matching kernel and network-enabled initramfs with your PXE bootloader. This HTTP
+URL lets the Slax initramfs fetch its ISO without HTTPS or private CA support.
+
+Relative paths resolve beside the JSON configuration file;
 the default is a sibling directory named `tftp`. The example configuration uses
 `/var/lib/infra-box/tftp`. An absent directory is created at startup, and an
 unusable root or occupied listener stops the application along with its other
@@ -402,22 +418,29 @@ Transfers use binary (`octet`) mode. The server supports `blksize` (up to 1468
 bytes), `tsize`, and `timeout` negotiation, with standard 512-byte blocks when
 options are absent. Unknown options are omitted. Downloads are read-only and
 restricted to regular files beneath the root; traversal, symlink escapes, and
-uploads are rejected. Keep only public boot assets there. There is no directory
-listing or client authentication.
+uploads are rejected. Keep only public boot assets there. TFTP has no directory
+listing or client authentication; the HTTP and HTTPS `/boot/` directory is also
+public.
 
-Permit UDP port 69 and replies from the server's ephemeral transfer ports in
-any firewall between the client and server. The server allows 64 simultaneous
+Permit UDP port 69 and replies from the server's ephemeral transfer ports, plus
+TCP ports 80 and 443 for web downloads, in any firewall between the client and
+server. The TFTP server allows 64 simultaneous
 transfers, at most four per client IP, retries unacknowledged packets up to five
 attempts, and limits each transfer to ten minutes. Cancellation closes the
 listener and active transfers together.
 
-### HTTPS gateway and private CA
+### HTTP and HTTPS gateway and private CA
 
 The server creates its private CA and a signed gateway certificate at first
 startup. For `"domain": "home.arpa"`, visit `https://gateway.home.arpa/`. The built-in
 DNS server always resolves `gateway.home.arpa` to `server_ip`, independently of
 DHCP leases. The certificate covers both `gateway.home.arpa` and the server IP,
 so `https://192.168.50.2/` also works after the root has been trusted.
+
+The same gateway page, public CA downloads, and `/boot/` files are available over
+HTTP at `http://gateway.home.arpa/` or `http://192.168.50.2/`. HTTP and HTTPS run
+simultaneously on ports 80 and 443, respectively; HTTP requests are served
+directly without redirecting to HTTPS. The ACME API requires HTTPS.
 
 The gateway page displays the root certificate's SHA-256 fingerprint and offers:
 

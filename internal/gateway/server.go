@@ -30,12 +30,14 @@ var pageHTML string
 type Config struct {
 	Address string
 	Domain  string
+	// BootDirectory optionally exposes the public TFTP root at /boot/.
+	BootDirectory string
 	// ACMEHandler optionally serves /acme/ requests, including signed POSTs.
 	// The handler must support concurrent requests.
 	ACMEHandler http.Handler
 }
 
-// Server serves the HTTPS gateway, public root downloads, and optional ACME API.
+// Server serves the HTTPS gateway, public downloads, and optional ACME API.
 type Server struct {
 	config         Config
 	hostname       string
@@ -190,8 +192,8 @@ func (s *Server) serve(ctx context.Context, listener net.Listener) error {
 	return nil
 }
 
-// ServeHTTP routes ACME requests to the configured handler and serves immutable
-// public certificate downloads and the gateway page for GET and HEAD requests.
+// ServeHTTP routes ACME requests to the configured handler and serves public
+// certificate and boot downloads and the gateway page for GET and HEAD.
 func (s *Server) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -206,6 +208,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet && request.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		s.write(w, request, http.StatusMethodNotAllowed, "text/plain; charset=utf-8", []byte("method not allowed\n"))
+		return
+	}
+	if s.config.BootDirectory != "" && (request.URL.Path == "/boot" || strings.HasPrefix(request.URL.Path, "/boot/")) {
+		s.serveBoot(w, request)
 		return
 	}
 	switch request.URL.Path {

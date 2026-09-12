@@ -71,7 +71,7 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	https, err := newGateway(cfg, ca, leases, logger)
+	web, err := newGateway(cfg, ca, leases, logger)
 	if err != nil {
 		return err
 	}
@@ -81,7 +81,7 @@ func run(logger *slog.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return serve(ctx, dhcp.Run, dns.Run, tftp.Run, https.Run, ldap.Run)
+	return serve(ctx, dhcp.Run, dns.Run, tftp.Run, web.Run, ldap.Run)
 }
 
 func newLeaseManager(cfg config.Config) (*lease.Manager, error) {
@@ -131,14 +131,15 @@ func newGateway(cfg config.Config, ca *pki.Manager, leases *lease.Manager, logge
 	if err != nil {
 		return nil, fmt.Errorf("initialize ACME server: %w", err)
 	}
-	https, err := gateway.New(gateway.Config{
-		Address: cfg.HTTPSAddress, Domain: cfg.Domain, ACMEHandler: acme,
+	web, err := gateway.New(gateway.Config{
+		Address: cfg.HTTPSAddress, HTTPAddress: cfg.HTTPAddress, Domain: cfg.Domain,
+		ACMEHandler: acme, BootDirectory: cfg.TFTPDirectory,
 	}, ca.RootPEM(), ca.GetCertificate, logger)
 	if err != nil {
-		return nil, fmt.Errorf("initialize HTTPS gateway: %w", err)
+		return nil, fmt.Errorf("initialize web gateway: %w", err)
 	}
 	logger.Info("ACME HTTP-01 enabled", "directory", baseURL+"/directory", "state", cfg.ACMEStateFile)
-	return https, nil
+	return web, nil
 }
 
 func newLDAP(cfg config.Config, ca *pki.Manager, logger *slog.Logger) (*ldapserver.Server, error) {

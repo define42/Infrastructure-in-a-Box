@@ -18,7 +18,7 @@ import (
 // An invalid Router means no default gateway is advertised; an empty LeaseFile
 // disables persistence and an empty Upstream disables external DNS forwarding.
 // Loaded persistence paths are absolute; relative JSON values resolve beside the file.
-// DNSAddress, HTTPSAddress and TFTPAddress use ServerIP and fixed service ports.
+// DNSAddress, HTTPAddress, HTTPSAddress and TFTPAddress use ServerIP and fixed service ports.
 type Config struct {
 	Interface     string
 	DHCPAddress   string
@@ -35,6 +35,7 @@ type Config struct {
 	DNSTTL        time.Duration
 	TFTPAddress   string
 	TFTPDirectory string
+	HTTPAddress   string
 	HTTPSAddress  string
 	CADirectory   string
 	ACMEStateFile string
@@ -105,6 +106,7 @@ func (settings fileSettings) config() (Config, error) {
 		return Config{}, errors.New("tftp_root must name a directory")
 	}
 	cfg.DNSAddress = net.JoinHostPort(cfg.ServerIP.String(), "53")
+	cfg.HTTPAddress = net.JoinHostPort(cfg.ServerIP.String(), "80")
 	cfg.HTTPSAddress = net.JoinHostPort(cfg.ServerIP.String(), "443")
 	cfg.LDAP.Listen = net.JoinHostPort(cfg.ServerIP.String(), "389")
 	cfg.LDAP.TLSListen = net.JoinHostPort(cfg.ServerIP.String(), "636")
