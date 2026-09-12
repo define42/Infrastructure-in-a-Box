@@ -139,6 +139,18 @@ func newManager(cfg Config, now func() time.Time) (*Manager, error) {
 // do not register DNS names. Hostnames supplied only in DISCOVER are retained
 // for a subsequent Commit.
 func (m *Manager) Offer(clientID string, requested netip.Addr, hostname string) (Lease, error) {
+	return m.OfferWithFallback(clientID, requested, hostname, "")
+}
+
+// OfferWithFallback is Offer with a default name for clients that omit a
+// hostname and have no offered or current name. An existing offer, even one
+// without a name, takes precedence to preserve explicit DNS opt-outs.
+func (m *Manager) OfferWithFallback(
+	clientID string,
+	requested netip.Addr,
+	hostname string,
+	fallback string,
+) (Lease, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -152,9 +164,10 @@ func (m *Manager) Offer(clientID string, requested netip.Addr, hostname string) 
 	current, hasCurrent := m.state.leases[clientID]
 	previous, hasPrevious := m.state.offers[clientID]
 	if hostname == "" {
+		name = NormalizeHostname(fallback, m.cfg.Domain)
 		if hasPrevious {
 			name = previous.Hostname
-		} else if hasCurrent {
+		} else if hasCurrent && current.Hostname != "" {
 			name = current.Hostname
 		}
 	}
@@ -194,6 +207,19 @@ func (m *Manager) Offer(clientID string, requested netip.Addr, hostname string) 
 // the matching offer's name or the client's current name. Invalid, reserved, and
 // already occupied DNS names do not prevent address assignment.
 func (m *Manager) Commit(clientID string, ip netip.Addr, hostname string) (Lease, error) {
+	return m.CommitWithFallback(clientID, ip, hostname, "")
+}
+
+// CommitWithFallback is Commit with a default name for clients that omit a
+// hostname and have no matching offer or current name. A matching offer, even
+// one without a name, takes precedence to preserve explicit DNS opt-outs.
+// The fallback is subject to the same validation and DNS ownership checks.
+func (m *Manager) CommitWithFallback(
+	clientID string,
+	ip netip.Addr,
+	hostname string,
+	fallback string,
+) (Lease, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -206,9 +232,10 @@ func (m *Manager) Commit(clientID string, ip netip.Addr, hostname string) (Lease
 
 	name := NormalizeHostname(hostname, m.cfg.Domain)
 	if hostname == "" {
+		name = NormalizeHostname(fallback, m.cfg.Domain)
 		if offered, ok := m.state.offers[clientID]; ok && offered.IP == ip {
 			name = offered.Hostname
-		} else if current, ok := m.state.leases[clientID]; ok {
+		} else if current, ok := m.state.leases[clientID]; ok && current.Hostname != "" {
 			name = current.Hostname
 		}
 	}

@@ -567,6 +567,79 @@ func TestDHCPDNSLifecycleIntegration(t *testing.T) {
 	checkDNS("desktop.home.arpa.", dns.TypeA, dns.RcodeNameError, "")
 	checkDNS(reverse, dns.TypePTR, dns.RcodeNameError, "")
 	checkDNS("gateway.home.arpa.", dns.TypeA, dns.RcodeSuccess, config.ServerIP.String())
+
+	const generatedHostname = "host-hw-1-020000000001.home.arpa"
+	offer = dhcpRequest(dhcpv4.MessageTypeDiscover)
+	if offer == nil || offer.MessageType() != dhcpv4.MessageTypeOffer {
+		t.Fatalf("expected unnamed client DHCP OFFER, got %v", offer)
+	}
+	if offer.HostName() != generatedHostname {
+		t.Fatalf("OFFER hostname = %q; want %q", offer.HostName(), generatedHostname)
+	}
+	reverse, err = dns.ReverseAddr(offer.YourIPAddr.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkDNS(generatedHostname+".", dns.TypeA, dns.RcodeNameError, "")
+	checkDNS(reverse, dns.TypePTR, dns.RcodeNameError, "")
+	ack = dhcpRequest(dhcpv4.MessageTypeRequest,
+		dhcpv4.WithOption(dhcpv4.OptRequestedIPAddress(offer.YourIPAddr)),
+		dhcpv4.WithOption(dhcpv4.OptServerIdentifier(offer.ServerIdentifier())),
+	)
+	if ack == nil || ack.MessageType() != dhcpv4.MessageTypeAck {
+		t.Fatalf("expected unnamed client DHCP ACK, got %v", ack)
+	}
+	if ack.HostName() != generatedHostname || !ack.YourIPAddr.Equal(offer.YourIPAddr) {
+		t.Fatalf("ACK did not retain offered hostname and IP: %v", ack)
+	}
+	current, found := manager.LookupName(generatedHostname)
+	if !found || current.Hostname != generatedHostname+"." {
+		t.Fatalf("generated lease hostname = %q, found = %v", current.Hostname, found)
+	}
+	checkDNS(generatedHostname+".", dns.TypeA, dns.RcodeSuccess, ack.YourIPAddr.String())
+	checkDNS(reverse, dns.TypePTR, dns.RcodeSuccess, generatedHostname+".")
+
+	// A new identity on the same hardware must get its own forward and reverse DNS.
+	clientID := dhcpv4.WithOption(dhcpv4.OptClientIdentifier([]byte{1, 2, 0, 0, 0, 0, 1}))
+	const identifiedHostname = "host-id-01020000000001.home.arpa."
+	identifiedOffer := dhcpRequest(dhcpv4.MessageTypeDiscover, clientID)
+	if identifiedOffer == nil || identifiedOffer.MessageType() != dhcpv4.MessageTypeOffer {
+		t.Fatalf("expected identified client DHCP OFFER, got %v", identifiedOffer)
+	}
+	checkDNS(identifiedHostname, dns.TypeA, dns.RcodeNameError, "")
+	identifiedAck := dhcpRequest(dhcpv4.MessageTypeRequest, clientID,
+		dhcpv4.WithOption(dhcpv4.OptRequestedIPAddress(identifiedOffer.YourIPAddr)),
+		dhcpv4.WithOption(dhcpv4.OptServerIdentifier(identifiedOffer.ServerIdentifier())),
+	)
+	if identifiedAck == nil || identifiedAck.MessageType() != dhcpv4.MessageTypeAck {
+		t.Fatalf("expected identified client DHCP ACK, got %v", identifiedAck)
+	}
+	if identifiedAck.YourIPAddr.Equal(ack.YourIPAddr) {
+		t.Fatal("different client identities received the same address")
+	}
+	identifiedReverse, err := dns.ReverseAddr(identifiedAck.YourIPAddr.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkDNS(identifiedHostname, dns.TypeA, dns.RcodeSuccess, identifiedAck.YourIPAddr.String())
+	checkDNS(identifiedReverse, dns.TypePTR, dns.RcodeSuccess, identifiedHostname)
+	checkDNS(generatedHostname+".", dns.TypeA, dns.RcodeSuccess, ack.YourIPAddr.String())
+	checkDNS(reverse, dns.TypePTR, dns.RcodeSuccess, generatedHostname+".")
+
+	if reply := dhcpRequest(dhcpv4.MessageTypeRelease, dhcpv4.WithClientIP(ack.YourIPAddr),
+		dhcpv4.WithOption(dhcpv4.OptServerIdentifier(ack.ServerIdentifier()))); reply != nil {
+		t.Fatalf("unexpected unnamed client RELEASE response: %v", reply)
+	}
+	checkDNS(generatedHostname+".", dns.TypeA, dns.RcodeNameError, "")
+	checkDNS(reverse, dns.TypePTR, dns.RcodeNameError, "")
+	checkDNS(identifiedHostname, dns.TypeA, dns.RcodeSuccess, identifiedAck.YourIPAddr.String())
+	checkDNS(identifiedReverse, dns.TypePTR, dns.RcodeSuccess, identifiedHostname)
+	if reply := dhcpRequest(dhcpv4.MessageTypeRelease, clientID, dhcpv4.WithClientIP(identifiedAck.YourIPAddr),
+		dhcpv4.WithOption(dhcpv4.OptServerIdentifier(identifiedAck.ServerIdentifier()))); reply != nil {
+		t.Fatalf("unexpected identified client RELEASE response: %v", reply)
+	}
+	checkDNS(identifiedHostname, dns.TypeA, dns.RcodeNameError, "")
+	checkDNS(identifiedReverse, dns.TypePTR, dns.RcodeNameError, "")
 }
 
 func listenPair(t *testing.T) (net.Listener, net.PacketConn) {

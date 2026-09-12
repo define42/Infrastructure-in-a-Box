@@ -1,9 +1,12 @@
 GOLANGCI_LINT ?= go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
 
-.PHONY: build test integration e2e-qemu vet lint check clean
+.PHONY: build boot test integration e2e-qemu vet lint check clean
 
 build:
 	go build -o bin/infra-box ./cmd/infra-box
+
+boot: build
+	sudo ./bin/infra-box -config config.example.json
 
 test:
 	go test -race ./...

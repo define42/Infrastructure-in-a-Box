@@ -1,6 +1,8 @@
 package dhcpserver
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -40,6 +42,19 @@ func clientHostname(request *dhcpv4.DHCPv4) string {
 		}
 	}
 	return ""
+}
+
+func fallbackHostname(clientID string) string {
+	if clientID == "" {
+		return ""
+	}
+	name := "host-" + strings.ReplaceAll(clientID, ":", "-")
+	if len(name) <= 63 {
+		return name
+	}
+	// Hash long identities instead of truncating away distinguishing bytes.
+	digest := sha256.Sum256([]byte(clientID))
+	return "host-sha256-" + hex.EncodeToString(digest[:24])
 }
 
 func fqdnReply(request *dhcpv4.DHCPv4, hostname string) []byte {

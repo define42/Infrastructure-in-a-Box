@@ -153,6 +153,175 @@ func TestOfferInvalidHostnameClearsPreviousDNSOnCommit(t *testing.T) {
 	}
 }
 
+func TestFallbackNamesPreviouslyUnnamedLease(t *testing.T) {
+	t.Parallel()
+	for _, viaOffer := range []bool{false, true} {
+		t.Run(fmt.Sprintf("offer=%t", viaOffer), func(t *testing.T) {
+			t.Parallel()
+			cfg := testConfig()
+			m, _ := testManager(t, cfg)
+			current, err := m.Commit("client", cfg.PoolStart, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			const fallback = "host-02-00-00-00-00-01"
+			const expected = fallback + ".home.arpa."
+			if viaOffer {
+				offer, err := m.OfferWithFallback("client", current.IP, "", fallback)
+				if err != nil || offer.Hostname != expected {
+					t.Fatalf("unnamed lease offer = %+v, %v; want %q", offer, err, expected)
+				}
+				if _, ok := m.LookupName(fallback); ok {
+					t.Fatal("fallback appeared in DNS before the offer was committed")
+				}
+			}
+			renewed, err := m.CommitWithFallback("client", current.IP, "", fallback)
+			if err != nil || renewed.Hostname != expected {
+				t.Fatalf("unnamed lease renewal = %+v, %v; want %q", renewed, err, expected)
+			}
+			if got, ok := m.LookupName(fallback); !ok || got != renewed {
+				t.Fatalf("fallback DNS lookup = %+v, %v; want %+v", got, ok, renewed)
+			}
+		})
+	}
+}
+
+func TestFallbackPreservesSuppliedAndStoredHostnames(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		viaOffer bool
+		offered  string
+		hostname string
+		expected string
+	}{
+		{"current lease renewal", false, "", "", "current.home.arpa."},
+		{"current lease discover", true, "", "", "current.home.arpa."},
+		{"matching offer overrides current", true, "offered", "", "offered.home.arpa."},
+		{"request overrides matching offer", true, "offered", "requested", "requested.home.arpa."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := testConfig()
+			m, _ := testManager(t, cfg)
+			current, err := m.Commit("client", cfg.PoolStart, "current")
+			if err != nil {
+				t.Fatal(err)
+			}
+			const fallback = "host-02-00-00-00-00-01"
+			if tc.viaOffer {
+				offer, err := m.OfferWithFallback("client", current.IP, tc.offered, fallback)
+				expected := current.Hostname
+				if tc.offered != "" {
+					expected = tc.offered + ".home.arpa."
+				}
+				if err != nil || offer.Hostname != expected {
+					t.Fatalf("offer = %+v, %v; want hostname %q", offer, err, expected)
+				}
+			}
+			renewed, err := m.CommitWithFallback("client", current.IP, tc.hostname, fallback)
+			if err != nil || renewed.Hostname != tc.expected {
+				t.Fatalf("renewal = %+v, %v; want hostname %q", renewed, err, tc.expected)
+			}
+			if _, ok := m.LookupName(fallback); ok {
+				t.Fatal("fallback replaced a supplied or stored name")
+			}
+		})
+	}
+}
+
+func TestFallbackPreservesExplicitlyUnnamedOffer(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		hostname string
+	}{
+		{"invalid hostname", "bad_name"},
+		{"no registration sentinel", "\x00"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := testConfig()
+			m, _ := testManager(t, cfg)
+			current, err := m.Commit("client", cfg.PoolStart, "previous")
+			if err != nil {
+				t.Fatal(err)
+			}
+			const fallback = "host-02-00-00-00-00-01"
+			offer, err := m.OfferWithFallback("client", current.IP, tc.hostname, fallback)
+			if err != nil || offer.Hostname != "" {
+				t.Fatalf("explicitly unnamed offer = %+v, %v", offer, err)
+			}
+			repeated, err := m.OfferWithFallback("client", current.IP, "", fallback)
+			if err != nil || repeated.Hostname != "" {
+				t.Fatalf("retransmitted discover restored a hostname: %+v, %v", repeated, err)
+			}
+			renewed, err := m.CommitWithFallback("client", current.IP, "", fallback)
+			if err != nil || renewed.Hostname != "" {
+				t.Fatalf("request restored an explicitly cleared hostname: %+v, %v", renewed, err)
+			}
+			for _, name := range []string{"previous", fallback} {
+				if _, ok := m.LookupName(name); ok {
+					t.Errorf("unexpected DNS registration for %q", name)
+				}
+			}
+		})
+	}
+}
+
+func TestFallbackSuppressesReservedAndOccupiedNames(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		isReserved bool
+		viaOffer   bool
+	}{
+		{"reserved direct request", true, false},
+		{"reserved offered name", true, true},
+		{"occupied direct request", false, false},
+		{"occupied offered name", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			const fallback = "host-02-00-00-00-00-01"
+			cfg := testConfig()
+			originalName := fallback
+			if tc.isReserved {
+				cfg.ReservedNames = []string{fallback}
+				originalName = "original"
+			}
+			m, _ := testManager(t, cfg)
+			original, err := m.Commit("original", cfg.PoolStart, originalName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.viaOffer {
+				if _, err := m.OfferWithFallback("client", cfg.PoolEnd, "", fallback); err != nil {
+					t.Fatal(err)
+				}
+			}
+			current, err := m.CommitWithFallback("client", cfg.PoolEnd, "", fallback)
+			if err != nil || current.Hostname != "" {
+				t.Fatalf("conflicting fallback should grant an unnamed lease: %+v, %v", current, err)
+			}
+			if got, ok := m.LookupIP(current.IP); !ok || got != current {
+				t.Fatalf("unnamed lease lookup = %+v, %v; want %+v", got, ok, current)
+			}
+			if got, ok := m.LookupName(originalName); !ok || got != original {
+				t.Fatalf("original DNS registration changed: %+v, %v", got, ok)
+			}
+			if tc.isReserved {
+				if _, ok := m.LookupName(fallback); ok {
+					t.Fatal("reserved fallback was registered")
+				}
+			}
+		})
+	}
+}
+
 func TestCommitRenewsAndExpiresDNS(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()

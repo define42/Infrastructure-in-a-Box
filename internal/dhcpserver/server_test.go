@@ -1,12 +1,14 @@
 package dhcpserver
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
 	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,6 +111,301 @@ func TestHandleLeaseLifecycle(t *testing.T) {
 	}
 	if _, ok := manager.LookupIP(active.IP); ok {
 		t.Fatal("release retained lease and DNS")
+	}
+}
+
+func TestHandleMissingHostname(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		mods []dhcpv4.Modifier
+		want string
+	}{
+		{
+			name: "missing options",
+			want: "host-hw-1-020000000001.home.arpa",
+		},
+		{
+			name: "empty option 12",
+			mods: []dhcpv4.Modifier{dhcpv4.WithOption(dhcpv4.OptHostName(""))},
+			want: "host-hw-1-020000000001.home.arpa",
+		},
+		{
+			name: "empty FQDN",
+			mods: []dhcpv4.Modifier{dhcpv4.WithGeneric(dhcpv4.OptionFQDN, []byte{4, 0, 0, 0})},
+			want: "host-hw-1-020000000001.home.arpa",
+		},
+		{
+			name: "client identifier before MAC",
+			mods: []dhcpv4.Modifier{
+				dhcpv4.WithGeneric(dhcpv4.OptionClientIdentifier, []byte{0, 'i', 'd'}),
+				dhcpv4.WithHwAddr(net.HardwareAddr{0x02, 0xab, 0xcd, 0xef, 0x00, 0x42}),
+			},
+			want: "host-id-006964.home.arpa",
+		},
+		{
+			name: "no hardware address",
+			mods: []dhcpv4.Modifier{
+				dhcpv4.WithGeneric(dhcpv4.OptionClientIdentifier, []byte{0, 'i', 'd'}),
+				dhcpv4.WithHwAddr(net.HardwareAddr{}),
+			},
+			want: "host-id-006964.home.arpa",
+		},
+		{
+			name: "explicit invalid hostname",
+			mods: []dhcpv4.Modifier{dhcpv4.WithOption(dhcpv4.OptHostName("bad_name"))},
+		},
+		{
+			name: "DNS registration disabled",
+			mods: []dhcpv4.Modifier{dhcpv4.WithGeneric(dhcpv4.OptionFQDN, []byte{8, 0, 0})},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, manager := testServer(t, "")
+			request := packet(t, dhcpv4.MessageTypeRequest, 1, tc.mods...)
+			request.UpdateOption(dhcpv4.OptRequestedIPAddress(net.ParseIP("192.168.50.100")))
+			ack := handle(t, s, request, dhcpv4.MessageTypeAck)
+			if got := ack.HostName(); got != tc.want {
+				t.Fatalf("ACK option 12 = %q, want %q", got, tc.want)
+			}
+			current, ok := manager.LookupIP(ipv4(ack.YourIPAddr))
+			if !ok {
+				t.Fatal("ACK did not commit the lease")
+			}
+			want := tc.want
+			if want != "" {
+				want += "."
+			}
+			if current.Hostname != want {
+				t.Fatalf("lease hostname = %q, want %q", current.Hostname, want)
+			}
+		})
+	}
+}
+
+func TestHandleFallbackHostnameLifecycle(t *testing.T) {
+	t.Parallel()
+	file := filepath.Join(t.TempDir(), "leases.json")
+	s, manager := testServer(t, file)
+	const fallback = "host-hw-1-020000000001.home.arpa"
+	offer := handle(t, s, packet(t, dhcpv4.MessageTypeDiscover, 1), dhcpv4.MessageTypeOffer)
+	if got := offer.HostName(); got != fallback {
+		t.Fatalf("OFFER option 12 = %q, want %q", got, fallback)
+	}
+	if _, ok := manager.LookupName(fallback); ok {
+		t.Fatal("offer registered the fallback before acknowledgement")
+	}
+	ack := handle(t, s, packet(t, dhcpv4.MessageTypeRequest, 1,
+		dhcpv4.WithOption(dhcpv4.OptRequestedIPAddress(offer.YourIPAddr)),
+		dhcpv4.WithOption(dhcpv4.OptServerIdentifier(offer.ServerIdentifier())),
+	), dhcpv4.MessageTypeAck)
+	if got := ack.HostName(); got != fallback {
+		t.Fatalf("ACK option 12 = %q, want %q", got, fallback)
+	}
+	// Restoring and renewing the lease must retain its generated registration.
+	s, manager = testServer(t, file)
+	current, ok := manager.LookupName(fallback)
+	if !ok || current.IP != ipv4(ack.YourIPAddr) {
+		t.Fatal("fallback registration was not restored")
+	}
+	renewal := packet(t, dhcpv4.MessageTypeRequest, 1, dhcpv4.WithClientIP(ack.YourIPAddr))
+	if got := handle(t, s, renewal, dhcpv4.MessageTypeAck).HostName(); got != fallback {
+		t.Fatalf("renewal option 12 = %q, want %q", got, fallback)
+	}
+	// A client-supplied name replaces the fallback and survives unnamed renewals.
+	renewal.UpdateOption(dhcpv4.OptHostName("Laptop"))
+	handle(t, s, renewal, dhcpv4.MessageTypeAck)
+	if _, ok := manager.LookupName(fallback); ok {
+		t.Fatal("rename retained the generated DNS name")
+	}
+	renewal.Options.Del(dhcpv4.OptionHostName)
+	if got := handle(t, s, renewal, dhcpv4.MessageTypeAck).HostName(); got != "laptop.home.arpa" {
+		t.Fatalf("unnamed renewal replaced the stored hostname: %q", got)
+	}
+}
+
+func TestHandleFallbackHostnameDistinctClientIdentities(t *testing.T) {
+	t.Parallel()
+	file := filepath.Join(t.TempDir(), "leases.json")
+	s, manager := testServer(t, file)
+	mac := net.HardwareAddr{0xa4, 0xbb, 0x6d, 0x73, 0xdb, 0x00}
+	clientID := []byte{1, 0xa4, 0xbb, 0x6d, 0x73, 0xdb, 0x00}
+	identities := []struct {
+		id       []byte
+		clientID string
+		hostname string
+		ip       netip.Addr
+	}{
+		{
+			clientID: "hw:1:a4bb6d73db00",
+			hostname: "host-hw-1-a4bb6d73db00.home.arpa",
+			ip:       netip.MustParseAddr("192.168.50.100"),
+		},
+		{
+			id:       clientID,
+			clientID: "id:01a4bb6d73db00",
+			hostname: "host-id-01a4bb6d73db00.home.arpa",
+			ip:       netip.MustParseAddr("192.168.50.101"),
+		},
+	}
+	checkRegistration := func(name, clientID string, ip netip.Addr) {
+		t.Helper()
+		forward, ok := manager.LookupName(name)
+		if !ok || forward.IP != ip || forward.ClientID != clientID {
+			t.Fatalf("name lookup for %q = %+v, %v", name, forward, ok)
+		}
+		reverse, ok := manager.LookupIP(ip)
+		if !ok || reverse.Hostname != name+"." || reverse.ClientID != clientID {
+			t.Fatalf("IP lookup for %s = %+v, %v", ip, reverse, ok)
+		}
+	}
+	for _, identity := range identities {
+		mods := []dhcpv4.Modifier{dhcpv4.WithHwAddr(mac)}
+		if identity.id != nil {
+			mods = append(mods, dhcpv4.WithGeneric(dhcpv4.OptionClientIdentifier, identity.id))
+		}
+		offer := handle(t, s, packet(t, dhcpv4.MessageTypeDiscover, 1, mods...), dhcpv4.MessageTypeOffer)
+		if offer.HostName() != identity.hostname || ipv4(offer.YourIPAddr) != identity.ip {
+			t.Fatalf("offer for %s = %s, %q", identity.clientID, offer.YourIPAddr, offer.HostName())
+		}
+		if _, ok := manager.LookupName(identity.hostname); ok {
+			t.Fatal("offer registered DNS before acknowledgement")
+		}
+		mods = append(mods,
+			dhcpv4.WithOption(dhcpv4.OptRequestedIPAddress(offer.YourIPAddr)),
+			dhcpv4.WithOption(dhcpv4.OptServerIdentifier(offer.ServerIdentifier())),
+		)
+		ack := handle(t, s, packet(t, dhcpv4.MessageTypeRequest, 1, mods...), dhcpv4.MessageTypeAck)
+		if ack.HostName() != identity.hostname || ipv4(ack.YourIPAddr) != identity.ip {
+			t.Fatalf("ack for %s = %s, %q", identity.clientID, ack.YourIPAddr, ack.HostName())
+		}
+		checkRegistration(identity.hostname, identity.clientID, identity.ip)
+	}
+	s, manager = testServer(t, file)
+	for _, identity := range identities {
+		checkRegistration(identity.hostname, identity.clientID, identity.ip)
+		mods := []dhcpv4.Modifier{dhcpv4.WithHwAddr(mac), dhcpv4.WithClientIP(net.IP(identity.ip.AsSlice()))}
+		if identity.id != nil {
+			mods = append(mods, dhcpv4.WithGeneric(dhcpv4.OptionClientIdentifier, identity.id))
+		}
+		ack := handle(t, s, packet(t, dhcpv4.MessageTypeRequest, 1, mods...), dhcpv4.MessageTypeAck)
+		if ack.HostName() != identity.hostname || ipv4(ack.YourIPAddr) != identity.ip {
+			t.Fatalf("renewal for %s = %s, %q", identity.clientID, ack.YourIPAddr, ack.HostName())
+		}
+		checkRegistration(identity.hostname, identity.clientID, identity.ip)
+	}
+}
+
+func TestHandleFallbackHostnameLongClientIdentifiers(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		length int
+		hashed bool
+	}{
+		{name: "last readable identifier", length: 27},
+		{name: "first hashed identifier", length: 28, hashed: true},
+		{name: "maximum identifier", length: 255, hashed: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			file := filepath.Join(t.TempDir(), "leases.json")
+			s, manager := testServer(t, file)
+			id := bytes.Repeat([]byte{1}, tc.length)
+			acquire := func() *dhcpv4.DHCPv4 {
+				t.Helper()
+				modifier := dhcpv4.WithGeneric(dhcpv4.OptionClientIdentifier, id)
+				offer := handle(t, s, packet(t, dhcpv4.MessageTypeDiscover, 1, modifier), dhcpv4.MessageTypeOffer)
+				ack := handle(t, s, packet(t, dhcpv4.MessageTypeRequest, 1, modifier,
+					dhcpv4.WithOption(dhcpv4.OptRequestedIPAddress(offer.YourIPAddr)),
+					dhcpv4.WithOption(dhcpv4.OptServerIdentifier(offer.ServerIdentifier())),
+				), dhcpv4.MessageTypeAck)
+				if ack.HostName() != offer.HostName() {
+					t.Fatalf("ACK hostname %q differs from offer %q", ack.HostName(), offer.HostName())
+				}
+				return ack
+			}
+			first := acquire()
+			label := strings.TrimSuffix(first.HostName(), ".home.arpa")
+			if tc.hashed {
+				if !strings.HasPrefix(label, "host-sha256-") || len(label) != 60 {
+					t.Fatalf("long identifier hostname label = %q", label)
+				}
+			} else if want := "host-id-" + strings.Repeat("01", tc.length); label != want {
+				t.Fatalf("readable hostname label = %q, want %q", label, want)
+			}
+			if lease.NormalizeHostname(first.HostName(), "home.arpa") != first.HostName()+"." {
+				t.Fatalf("invalid generated DNS name %q", first.HostName())
+			}
+			// Identifiers differing beyond the readable prefix must not collide.
+			id[len(id)-1] = 2
+			second := acquire()
+			if second.HostName() == first.HostName() || second.HostName() == "" || second.YourIPAddr.Equal(first.YourIPAddr) {
+				t.Fatalf("distinct identifiers share an address or hostname: %v, %v", first, second)
+			}
+			s, manager = testServer(t, file)
+			for i, ack := range []*dhcpv4.DHCPv4{first, second} {
+				id[len(id)-1] = byte(i + 1)
+				stored, ok := manager.LookupName(ack.HostName())
+				if !ok || stored.IP != ipv4(ack.YourIPAddr) {
+					t.Fatalf("generated name %q was not restored", ack.HostName())
+				}
+				renewal := packet(t, dhcpv4.MessageTypeRequest, 1,
+					dhcpv4.WithGeneric(dhcpv4.OptionClientIdentifier, id),
+					dhcpv4.WithClientIP(ack.YourIPAddr),
+				)
+				if got := handle(t, s, renewal, dhcpv4.MessageTypeAck).HostName(); got != ack.HostName() {
+					t.Fatalf("renewed hostname = %q, want %q", got, ack.HostName())
+				}
+			}
+		})
+	}
+}
+
+func TestHandleFallbackHostnameExistingLeases(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		stored   string
+		clientID string
+		id       []byte
+		want     string
+	}{
+		{
+			name: "preserves legacy MAC name", stored: "host-02-00-00-00-00-01",
+			clientID: "hw:1:020000000001", want: "host-02-00-00-00-00-01.home.arpa",
+		},
+		{
+			name: "names existing unnamed identity", clientID: "id:006964", id: []byte{0, 'i', 'd'},
+			want: "host-id-006964.home.arpa",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			file := filepath.Join(t.TempDir(), "leases.json")
+			_, manager := testServer(t, file)
+			ip := netip.MustParseAddr("192.168.50.100")
+			if _, err := manager.Commit(tc.clientID, ip, tc.stored); err != nil {
+				t.Fatal(err)
+			}
+			s, manager := testServer(t, file)
+			renewal := packet(t, dhcpv4.MessageTypeRequest, 1, dhcpv4.WithClientIP(net.IP(ip.AsSlice())))
+			if tc.id != nil {
+				renewal.UpdateOption(dhcpv4.OptClientIdentifier(tc.id))
+			}
+			ack := handle(t, s, renewal, dhcpv4.MessageTypeAck)
+			if ack.HostName() != tc.want || ipv4(ack.YourIPAddr) != ip {
+				t.Fatalf("renewed lease = %s, %q", ack.YourIPAddr, ack.HostName())
+			}
+			current, ok := manager.LookupName(tc.want)
+			if !ok || current.IP != ip || current.ClientID != tc.clientID {
+				t.Fatalf("renewed registration = %+v, %v", current, ok)
+			}
+		})
 	}
 }
 

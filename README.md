@@ -46,8 +46,8 @@ User directory:   ldaps://ldap.home.arpa:636
 
 This example uses the default `home.arpa` domain; the actual client address
 comes from the configured pool. Certificates become trusted after clients
-install the private root CA. DHCP hostnames are supplied by clients, so
-certificate issuance assumes a trusted private network.
+install the private root CA. DHCP names come from client-supplied hostnames or
+DHCP client identities, so certificate issuance assumes a trusted private network.
 
 Read on for [getting started](#getting-started), [configuration](#configuration),
 [DHCP and DNS behavior](#lease-and-dns-behavior),
@@ -240,10 +240,26 @@ ports to the network you intend to serve, particularly when forwarding is enable
 
 ### Lease and DNS behavior
 
-Clients must supply a hostname through DHCP to receive a DNS name. The server
-uses Client FQDN option 81 when present, otherwise Host Name option 12, and honors
-option 81's request to skip DNS registration. The local domain is advertised in
-domain option 15 and search-list option 119 so clients can resolve short names.
+The server uses Client FQDN option 81 when present, otherwise Host Name option
+12, and honors option 81's request to skip DNS registration. When the client
+omits a name and none is retained from discovery or its current lease, the server
+generates a name from the same client identity used to track its lease:
+
+- With Client Identifier option 61: `host-id-<identifier-in-hex>`, such as
+  `host-id-01a4bb6d73db00`.
+- Without option 61: `host-hw-<hardware-type>-<hardware-address-in-hex>`, such as
+  `host-hw-1-a4bb6d73db00`.
+
+These names distinguish clients using the same MAC with different DHCP
+identities, including PXE firmware and iPXE. Names exceeding DNS's 63-character
+label limit use `host-sha256-` followed by the first 48 hexadecimal characters of
+the SHA-256 digest of the complete lease client ID. Existing nonempty lease
+names are retained, including generated names saved by earlier versions.
+An unnamed lease receives a generated name on its next unnamed DHCP request.
+OFFER and ACK replies advertise the assigned name with the local domain in
+option 12, for example `host-id-01a4bb6d73db00.home.arpa`.
+The local domain is advertised in domain option 15 and search-list option 119 so
+clients can resolve short names.
 `ns.home.arpa` identifies the built-in DNS server. The default domain,
 [`home.arpa`](https://www.rfc-editor.org/rfc/rfc8375.html), is reserved for home
 networks; avoid `.local`, which is reserved for
@@ -279,8 +295,8 @@ networks; avoid `.local`, which is reserved for
 
 This implementation serves one IPv4 subnet and one address pool. It does not
 provide DHCPv6, static reservations, dynamic DNS UPDATE, DNSSEC validation, or
-automatic ICMP/ARP probing for conflicting addresses. Client hostnames are
-client-supplied labels, not authenticated identities. Configure the pool to
+automatic ICMP/ARP probing for conflicting addresses. Client hostnames and DHCP
+client identifiers are not authenticated identities. Configure the pool to
 exclude all other equipment with static addresses.
 
 ### Local time with NTP
@@ -869,6 +885,8 @@ and `make lint`; `make check` runs all of them except the build. The binary is
 written to `bin/infra-box`. `make lint` runs the pinned golangci-lint version and
 checks formatting; its first run downloads the lint tool. If that version is
 already installed, use `make lint GOLANGCI_LINT=golangci-lint`.
+
+`make boot` builds the binary and starts it with `sudo` using `config.example.json`.
 
 [GitHub Actions](.github/workflows/ci.yml) runs on pushes, pull requests, and
 manual dispatch. It builds the application and runs both test suites with race

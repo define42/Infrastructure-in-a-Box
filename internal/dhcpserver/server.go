@@ -150,7 +150,12 @@ func (s *Server) Handle(request *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 		if current.IsValid() || serverID.IsValid() {
 			return nil, nil
 		}
-		allocation, err := s.leases.Offer(clientID, requested, clientHostname(request))
+		allocation, err := s.leases.OfferWithFallback(
+			clientID,
+			requested,
+			clientHostname(request),
+			fallbackHostname(clientID),
+		)
 		if errors.Is(err, lease.ErrPoolExhausted) {
 			s.logger.Warn("DHCP pool exhausted")
 			return nil, nil
@@ -169,7 +174,12 @@ func (s *Server) Handle(request *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 		} else if !requested.IsValid() {
 			return nil, nil
 		}
-		allocation, err := s.leases.Commit(clientID, requested, clientHostname(request))
+		allocation, err := s.leases.CommitWithFallback(
+			clientID,
+			requested,
+			clientHostname(request),
+			fallbackHostname(clientID),
+		)
 		if errors.Is(err, lease.ErrUnavailable) || errors.Is(err, lease.ErrPoolExhausted) {
 			return s.reply(request, dhcpv4.MessageTypeNak, nil)
 		}
