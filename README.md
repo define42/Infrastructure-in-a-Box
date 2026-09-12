@@ -1,17 +1,23 @@
 # Infrastructure-in-a-Box
 
-Infrastructure-in-a-Box is a single Go application that provides the core
-services for a private IPv4 network: automatic IP addresses, local DNS names,
-PXE boot files, HTTPS certificates, and a directory of users and groups. It
-brings DHCP, DNS, TFTP, a private certificate authority, ACME, LDAP, and optional NFSv4 shares together in one process,
-configured through one JSON file.
-
 [![Go version](https://img.shields.io/badge/Go-1.26%2B-00ADD8)](go.mod)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-Use it for a home network or lab where devices and applications need to find
-one another by name, use certificates from a shared private CA, and authenticate
-users through LDAP.
+Infrastructure-in-a-Box provides local network infrastructure for air-gapped
+workshops and labs. It combines DHCP, DNS, TFTP and PXE boot services, HTTPS,
+a private certificate authority, ACME, LDAP, and optional NFSv4 shares in one
+Go application, configured through a single JSON file.
+
+The design goal is to package the entire workshop or lab infrastructure on a
+DVD or USB stick, ready to bring to an isolated network. The planned package
+would include the application, configuration, boot files, and software needed
+for the environment, prepared before going offline. DVD/USB distribution is
+planned; the current build and setup instructions are provided below.
+
+Devices on the network can obtain IP addresses, find one another by name,
+boot from local files, use certificates from a shared private CA, authenticate
+users through LDAP, and access shared files over NFS. These services also suit
+private home networks and connected labs.
 
 | Service | What it provides |
 | --- | --- |
