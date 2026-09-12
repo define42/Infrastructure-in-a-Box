@@ -19,7 +19,7 @@ func testFilesystem(t *testing.T) (*filesystem, string, string) {
 			t.Fatal(err)
 		}
 	}
-	f, err := openFilesystem([]config.NFSShare{{Share: "data", Path: data}, {Share: "software", Path: software, ReadOnly: true}})
+	f, err := openFilesystem([]config.NFSShare{{Name: "data", Path: data}, {Name: "software", Path: software, ReadOnly: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,8 +179,8 @@ func TestFilesystemRejectsMissingAndAliasedRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, shares := range [][]config.NFSShare{
-		{{Share: "missing", Path: filepath.Join(dir, "missing")}},
-		{{Share: "data", Path: dir}, {Share: "readonly", Path: alias, ReadOnly: true}},
+		{{Name: "missing", Path: filepath.Join(dir, "missing")}},
+		{{Name: "data", Path: dir}, {Name: "readonly", Path: alias, ReadOnly: true}},
 	} {
 		if f, err := openFilesystem(shares); err == nil {
 			_ = f.Close()

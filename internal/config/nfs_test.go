@@ -17,7 +17,7 @@ func TestNFSConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data = append(data[:strings.LastIndex(string(data), "}")], []byte(`,"nfs":[{"share":"data","path":"/var/data","read_only":false},{"share":"software","path":"/srv/software","read_only":true}]}`)...)
+	data = append(data[:strings.LastIndex(string(data), "}")], []byte(`,"nfs":[{"name":"data","path":"/var/data","read_only":false},{"name":"software","path":"/srv/software","read_only":true}]}`)...)
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -34,16 +34,16 @@ func TestNFSInvalidConfiguration(t *testing.T) {
 	t.Parallel()
 	for _, value := range []string{
 		`null`, `{}`, `[null]`, `[{}]`,
-		`[{"share":"x","share":"y","path":"/srv/x"}]`,
-		`[{"share":"x","path":"/srv/x","unknown":true}]`,
-		`[{"share":"x","path":"/srv/x","read_only":null}]`,
-		`[{"share":"x","path":"/srv/x","read_only":"false"}]`,
-		`[{"share":"../x","path":"/srv/x"}]`,
-		`[{"share":"x/y","path":"/srv/x"}]`,
-		`[{"share":"x","path":"relative"}]`,
-		`[{"share":"x","path":"/srv/x"},{"share":"x","path":"/srv/y"}]`,
-		`[{"share":"x","path":"/srv/x"},{"share":"y","path":"/srv/x/sub"}]`,
-		`[{"share":"x","path":"/"}]`,
+		`[{"name":"x","name":"y","path":"/srv/x"}]`,
+		`[{"name":"x","path":"/srv/x","unknown":true}]`,
+		`[{"name":"x","path":"/srv/x","read_only":null}]`,
+		`[{"name":"x","path":"/srv/x","read_only":"false"}]`,
+		`[{"name":"../x","path":"/srv/x"}]`,
+		`[{"name":"x/y","path":"/srv/x"}]`,
+		`[{"name":"x","path":"relative"}]`,
+		`[{"name":"x","path":"/srv/x"},{"name":"x","path":"/srv/y"}]`,
+		`[{"name":"x","path":"/srv/x"},{"name":"y","path":"/srv/x/sub"}]`,
+		`[{"name":"x","path":"/"}]`,
 	} {
 		t.Run(value, func(t *testing.T) {
 			path := writeConfig(t)
@@ -71,7 +71,7 @@ func TestNFSProtectsPrivateState(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			shares, err := json.Marshal([]config.NFSShare{{Share: "private", Path: filepath.Join(filepath.Dir(path), target)}})
+			shares, err := json.Marshal([]config.NFSShare{{Name: "private", Path: filepath.Join(filepath.Dir(path), target)}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -101,7 +101,7 @@ func TestNFSRejectsPrivateStateSymlinkAlias(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	shares, err := json.Marshal([]config.NFSShare{{Share: "alias", Path: alias}})
+	shares, err := json.Marshal([]config.NFSShare{{Name: "alias", Path: alias}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -620,12 +620,12 @@ Add an optional `nfs` array to the existing top-level JSON object:
 
 ```json
 "nfs": [
-  { "share": "data", "path": "/var/data", "read_only": false },
-  { "share": "software", "path": "/srv/software", "read_only": true }
+  { "name": "data", "path": "/var/data", "read_only": false },
+  { "name": "software", "path": "/srv/software", "read_only": true }
 ]
 ```
 
-Each `share` names a directory directly below the NFS root. Names are unique,
+Each `name` identifies a directory directly below the NFS root. Names are unique,
 case-sensitive, and contain 1–255 ASCII letters, digits, underscores, dots, or
 hyphens, starting with a letter, digit, or underscore. `path` must be an absolute,
 existing directory. `read_only` is a JSON boolean and defaults to `false`.

@@ -68,7 +68,7 @@ func openFilesystem(shares []config.NFSShare) (*filesystem, error) {
 			_ = f.Close()
 			return nil, err
 		}
-		f.exports[share.Share] = &export{root: root, readOnly: share.ReadOnly}
+		f.exports[share.Name] = &export{root: root, readOnly: share.ReadOnly}
 	}
 	return f, nil
 }

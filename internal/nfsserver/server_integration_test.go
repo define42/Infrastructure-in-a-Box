@@ -50,7 +50,7 @@ func loopbackServer(t *testing.T) (net.Listener, context.CancelFunc, <-chan erro
 			t.Fatal(err)
 		}
 	}
-	s, err := New(Config{Address: "127.0.0.1:0", Shares: []config.NFSShare{{Share: "data", Path: data}, {Share: "software", Path: software, ReadOnly: true}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s, err := New(Config{Address: "127.0.0.1:0", Shares: []config.NFSShare{{Name: "data", Path: data}, {Name: "software", Path: software, ReadOnly: true}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

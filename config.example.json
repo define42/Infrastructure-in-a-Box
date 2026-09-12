@@ -13,8 +13,8 @@
   "upstream": "",
   "dns_ttl": "1m",
   "nfs": [
-    { "share": "data", "path": "/var/data", "read_only": false },
-    { "share": "software", "path": "/srv/software", "read_only": true }
+    { "name": "data", "path": "/var/data", "read_only": false },
+    { "name": "software", "path": "/srv/software", "read_only": true }
   ],
   "a_records": {
     "printer": "192.168.50.10",

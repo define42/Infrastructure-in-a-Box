@@ -10,10 +10,10 @@ import (
 	"strings"
 )
 
-// NFSShare exports Path at /Share in the NFSv4 namespace.
+// NFSShare exports Path at /Name in the NFSv4 namespace.
 // Path must be an absolute directory path; directories must exist at startup.
 type NFSShare struct {
-	Share    string `json:"share"`
+	Name     string `json:"name"`
 	Path     string `json:"path"`
 	ReadOnly bool   `json:"read_only"`
 }
@@ -24,19 +24,19 @@ var nfsSharePattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}$`)
 func ValidateNFSShares(shares []NFSShare) error {
 	names := make(map[string]bool, len(shares))
 	for i, share := range shares {
-		if !nfsSharePattern.MatchString(share.Share) {
-			return fmt.Errorf("nfs[%d].share must be a single name of 1–255 ASCII letters, digits, underscores, dots, or hyphens, starting with a letter, digit, or underscore", i)
+		if !nfsSharePattern.MatchString(share.Name) {
+			return fmt.Errorf("nfs[%d].name must be a single name of 1–255 ASCII letters, digits, underscores, dots, or hyphens, starting with a letter, digit, or underscore", i)
 		}
-		if names[share.Share] {
-			return fmt.Errorf("nfs[%d].share duplicates %q", i, share.Share)
+		if names[share.Name] {
+			return fmt.Errorf("nfs[%d].name duplicates %q", i, share.Name)
 		}
-		names[share.Share] = true
+		names[share.Name] = true
 		if !filepath.IsAbs(share.Path) || strings.ContainsRune(share.Path, 0) {
 			return fmt.Errorf("nfs[%d].path must be an absolute directory path", i)
 		}
 		for _, previous := range shares[:i] {
 			if pathWithin(previous.Path, share.Path) || pathWithin(share.Path, previous.Path) {
-				return fmt.Errorf("nfs shares %q and %q must not overlap", previous.Share, share.Share)
+				return fmt.Errorf("nfs shares %q and %q must not overlap", previous.Name, share.Name)
 			}
 		}
 	}
@@ -47,7 +47,7 @@ func decodeNFS(decoder *json.Decoder) ([]NFSShare, error) {
 	return decodeLDAPArray(decoder, "nfs", func(decoder *json.Decoder, path string) (NFSShare, error) {
 		var share NFSShare
 		err := decodeLDAPObject(decoder, path, map[string]any{
-			"share": &share.Share, "path": &share.Path, "read_only": &share.ReadOnly,
+			"name": &share.Name, "path": &share.Path, "read_only": &share.ReadOnly,
 		})
 		return share, err
 	})
@@ -96,16 +96,16 @@ func (c Config) validateNFSPaths(configPath string) error {
 	for _, share := range c.NFS {
 		resolved, err := canonicalPath(share.Path)
 		if err != nil {
-			return fmt.Errorf("resolve nfs share %q: %w", share.Share, err)
+			return fmt.Errorf("resolve nfs share %q: %w", share.Name, err)
 		}
 		share.Path = resolved
 		resolvedShares = append(resolvedShares, share)
 		for _, target := range protected {
 			if target.path != "" && pathWithin(share.Path, target.path) {
-				return fmt.Errorf("nfs share %q must not contain the %s", share.Share, target.name)
+				return fmt.Errorf("nfs share %q must not contain the %s", share.Name, target.name)
 			}
 			if target.name == "ca_dir" && pathWithin(target.path, share.Path) {
-				return fmt.Errorf("nfs share %q must not be inside ca_dir", share.Share)
+				return fmt.Errorf("nfs share %q must not be inside ca_dir", share.Name)
 			}
 		}
 	}
