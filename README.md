@@ -16,7 +16,7 @@ users through LDAP.
 | Service | What it provides |
 | --- | --- |
 | DHCPv4 | IPv4 leases from one address pool, with DNS and optional router settings sent to clients. |
-| TFTP and PXE | Read-only boot files with DHCP selecting the BIOS or x64 EFI loader from client architecture option 93. |
+| TFTP and PXE | Built-in iPXE loaders with DHCP selecting the BIOS or x64 EFI loader from client architecture option 93. |
 | DNS | Local names and reverse lookups for active DHCP leases, static and wildcard A records, and optional forwarding to an upstream resolver. |
 | Private CA and ACME | Certificates for active DHCP hostnames through ACME HTTP-01, plus certificates for the built-in HTTPS and LDAPS services. |
 | HTTP and HTTPS gateway | A page for downloading the public root CA and checking its fingerprint, plus read-only boot files. The ACME API uses HTTPS. |
@@ -84,6 +84,9 @@ this repository:
 go build -o bin/infra-box ./cmd/infra-box
 ```
 
+The build embeds the iPXE loaders in `ipxe/`. Run `./build-ipxe.sh` before
+building Go to regenerate them; see [PXE network boot](#pxe-network-boot).
+
 ### Configure and start
 
 Copy the [example configuration](config.example.json):
@@ -124,8 +127,8 @@ suitable operating-system capabilities. Permit client traffic to these ports:
 | LDAPS | `<server_ip>:636` | TLS over TCP |
 
 All services start together, including both LDAP listeners even when no users
-are configured. TFTP is always enabled, including when its root directory is
-empty. Both HTTP and HTTPS are always enabled. DNS, TFTP, HTTP, HTTPS, LDAP,
+are configured. TFTP always serves the built-in iPXE loaders. Both HTTP and
+HTTPS are always enabled. DNS, TFTP, HTTP, HTTPS, LDAP,
 and LDAPS ports are fixed. Configuration changes take effect after a restart.
 
 ### Check a client lease
@@ -175,7 +178,7 @@ The maximum file size is 1 MiB.
 | `lease_duration` | `12h` | Lease lifetime, in whole seconds, at least `1m`. |
 | `lease_file` | `leases.json` | Persisted lease state; set to `""` for memory only. |
 | `dhcp_listen` | `:67` | DHCP UDP listener; must not conflict with DNS or TFTP. |
-| `tftp_root` | `tftp` | Directory of public boot files, created if absent. Cannot be empty, contain the configuration or private state, or reside inside `ca_dir`. |
+| `tftp_root` | `tftp` | Directory of public HTTP/HTTPS `/boot/` files, created if absent; TFTP serves only built-in loaders. Cannot be empty, contain the configuration or private state, or reside inside `ca_dir`. |
 | `upstream` | `""` | Optional numeric IPv4 address and port for external DNS, such as `1.1.1.1:53`; empty disables forwarding. |
 | `dns_ttl` | `1m` | Maximum TTL for DNS records, in whole seconds, at least `1s`. |
 | `a_records` | `{}` | Exact or wildcard DNS names mapped to IPv4 address strings, including external-name overrides. |
@@ -356,25 +359,20 @@ dig +tcp @192.168.50.2 www.google.com A
 
 ### PXE network boot
 
-The always-enabled TFTP server listens on `<server_ip>:69` and serves files
-beneath `tftp_root`. The same directory is exposed read-only by the HTTP and HTTPS
-gateway at `http://gateway.<domain>/boot/` and `https://gateway.<domain>/boot/`,
-with directory browsing, HEAD, and byte-range downloads. For example,
-`bootx64.efi` is also available at `http://192.168.50.2/boot/bootx64.efi`.
-HTTP serves files directly without redirecting to HTTPS. All three protocols
-see file updates without a restart. HTTPS clients must trust the private root CA.
+The always-enabled TFTP server listens on `<server_ip>:69` and serves exactly
+two files embedded in the application: `pxelinux.0` (BIOS iPXE) and `bootx64.efi`
+(x64 UEFI iPXE). It never reads runtime files from disk. Both loaders obtain DHCP
+settings and load the main boot script over HTTP using this embedded bootstrap:
 
-For [stock Slax](https://www.slax.org/en/starting.php), place the ISO at
-`tftp_root/slax/slax.iso` and use
-`from=http://192.168.50.2/boot/slax/slax.iso` in the kernel command line. Use a
-matching kernel and network-enabled initramfs with your PXE bootloader. This HTTP
-URL lets the Slax initramfs fetch its ISO without HTTPS or private CA support.
+```ipxe
+#!ipxe
+dhcp
+chain http://${next-server}/boot/boot.ipxe
+```
 
-Relative paths resolve beside the JSON configuration file;
-the default is a sibling directory named `tftp`. The example configuration uses
-`/var/lib/infra-box/tftp`. An absent directory is created at startup, and an
-unusable root or occupied listener stops the application along with its other
-services.
+DHCP supplies `${next-server}`, so the loaders work across installations without
+a hardcoded IP address. The `pxelinux.0` filename contains iPXE; no PXELINUX
+modules or configuration are needed. The EFI loader is unsigned.
 
 DHCP OFFER and ACK replies select a boot filename from option **93 — Client
 System Architecture**:
@@ -389,25 +387,54 @@ System Architecture**:
 For a client listing multiple architectures, the first supported value wins.
 Replies include the boot-server IPv4 address in `siaddr`, the filename in the
 BOOTP file field, and DHCP options 66 and 67. Ordinary DHCP clients continue to
-receive leases without boot instructions. Boot filenames are advertised even
-if the corresponding files have not yet been installed.
+receive leases without boot instructions.
 
-Install your chosen bootloaders and their supporting files in the TFTP root.
-The application does not bundle or download bootloader binaries. For example:
+Place `boot.ipxe`, kernels, initramfs files, and operating-system images in
+`tftp_root`. This setting retains its name but now controls only the public HTTP
+and HTTPS `/boot/` directory. For example:
 
 ```text
 /var/lib/infra-box/tftp/
-├── pxelinux.0
-├── ldlinux.c32
-├── pxelinux.cfg/
-│   └── default
-├── bootx64.efi
-└── ... bootloader configuration, kernel and initramfs files ...
+├── boot.ipxe
+└── slax/
+    ├── vmlinuz
+    ├── initrfs.img
+    └── slax.iso
 ```
 
-Use `pxelinux.0` and supporting modules from the same PXELINUX distribution.
-Place an x64 EFI bootloader at `bootx64.efi` and include the configuration and
-other files required by that loader. Select network boot in the client firmware.
+For [Slax](https://www.slax.org/en/starting.php), use a matching kernel,
+network-enabled initramfs, and ISO, with this `boot.ipxe`:
+
+```ipxe
+#!ipxe
+set base http://${next-server}/boot/slax
+kernel ${base}/vmlinuz rw load_ramdisk=1 prompt_ramdisk=0 from=${base}/slax.iso
+initrd ${base}/initrfs.img
+boot
+```
+
+The gateway serves these files at `http://gateway.<domain>/boot/` and
+`https://gateway.<domain>/boot/`, with directory browsing, HEAD, and byte-range
+downloads. HTTP serves files directly without redirecting to HTTPS, allowing
+the Slax initramfs to access its ISO without HTTPS or private CA support.
+HTTPS clients must trust the private root CA. Web file updates take effect
+without a restart.
+
+Relative `tftp_root` paths resolve beside the JSON configuration file; the
+default is a sibling directory named `tftp`. The example configuration uses
+`/var/lib/infra-box/tftp`. The gateway creates an absent directory at startup.
+An unusable directory or occupied listener stops the application along with
+its other services.
+
+To update the built-in loaders, run `./build-ipxe.sh`. It downloads the
+[upstream source](https://ipxe.org/download) and writes both binaries, the
+embedded bootstrap, and the source commit to the repository's `ipxe/` directory.
+Then run `make build` or `go build -o bin/infra-box ./cmd/infra-box` and restart
+the application. The running server needs no loader directory. Use
+`./build-ipxe.sh --help` for dependencies and the `IPXE_REF` and `IPXE_JOBS`
+settings.
+
+Select network boot in the client firmware.
 To check a file transfer independently of firmware, run from a client:
 
 ```sh
@@ -416,11 +443,11 @@ curl --noproxy '*' tftp://192.168.50.2/pxelinux.0 -o /tmp/pxelinux.0
 
 Transfers use binary (`octet`) mode. The server supports `blksize` (up to 1468
 bytes), `tsize`, and `timeout` negotiation, with standard 512-byte blocks when
-options are absent. Unknown options are omitted. Downloads are read-only and
-restricted to regular files beneath the root; traversal, symlink escapes, and
-uploads are rejected. Keep only public boot assets there. TFTP has no directory
-listing or client authentication; the HTTP and HTTPS `/boot/` directory is also
-public.
+options are absent. Unknown options are omitted. Only the two built-in loader
+filenames can be downloaded; other filenames, paths, and uploads are rejected.
+TFTP has no directory listing or client authentication. The HTTP and HTTPS
+`/boot/` directory is also public; keep only public boot assets there. Web
+downloads reject traversal and symlink escapes outside `tftp_root`.
 
 Permit UDP port 69 and replies from the server's ephemeral transfer ports, plus
 TCP ports 80 and 443 for web downloads, in any firewall between the client and
@@ -721,7 +748,7 @@ handshake and certificate downloads.
 LDAP integration tests use loopback sockets and an independent LDAP client to
 exercise binds, searches, group membership, and access restrictions.
 TFTP integration tests exercise real loopback transfers, option negotiation,
-retransmission, root confinement, transfer limits, and shutdown. An independent
+retransmission, built-in file restrictions, transfer limits, and shutdown. An independent
 curl interoperability test runs when curl with TFTP support is installed.
 
 The Makefile provides `make build`, `make test`, `make integration`, `make vet`,

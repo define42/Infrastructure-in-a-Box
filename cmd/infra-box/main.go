@@ -63,7 +63,7 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	tftp, err := tftpserver.New(tftpserver.Config{Address: cfg.TFTPAddress, Root: cfg.TFTPDirectory}, logger)
+	tftp, err := tftpserver.New(tftpserver.Config{Address: cfg.TFTPAddress}, logger)
 	if err != nil {
 		return fmt.Errorf("initialize TFTP server: %w", err)
 	}

@@ -80,7 +80,7 @@ func TestBootFilesAndDirectories(t *testing.T) {
 	if w.Code != 301 || w.Header().Get("Location") != "/boot/?version=1" {
 		t.Fatal("missing directory redirect")
 	}
-	// Updates to the shared root are immediately visible without restarting HTTPS.
+	// Updates to the boot root are immediately visible without restarting the gateway.
 	if err := os.WriteFile(filepath.Join(root, "bootx64.efi"), []byte("updated"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -139,25 +139,64 @@ func TestBootFilesConfinePathsAndRejectWrites(t *testing.T) {
 	}
 }
 
-func TestBootRootCanAppearAfterGatewayStartup(t *testing.T) {
+func TestBootRootCreatedAtGatewayStartup(t *testing.T) {
 	t.Parallel()
-	s := testServer(t, testPKI(t))
-	s.config.BootDirectory = filepath.Join(t.TempDir(), "later")
-	w := httptest.NewRecorder()
-	s.ServeHTTP(w, httptest.NewRequest("GET", "/boot/bootx64.efi", nil))
-	if w.Code != 404 {
-		t.Fatalf("missing root: %d", w.Code)
-	}
-	if err := os.Mkdir(s.config.BootDirectory, 0755); err != nil {
+	manager := testPKI(t)
+	directory := filepath.Join(t.TempDir(), "assets", "boot")
+	s, err := New(Config{
+		Address: "127.0.0.1:0", HTTPAddress: "127.0.0.1:0", Domain: "home.arpa", BootDirectory: directory,
+	}, manager.RootPEM(), manager.GetCertificate, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(s.config.BootDirectory, "bootx64.efi"), []byte("boot"), 0644); err != nil {
+	if info, err := os.Stat(directory); err != nil || !info.IsDir() {
+		t.Fatalf("boot directory was not created: %v", err)
+	}
+	const script = "#!ipxe\nchain slax/boot.ipxe\n"
+	if err := os.WriteFile(filepath.Join(directory, "boot.ipxe"), []byte(script), 0644); err != nil {
 		t.Fatal(err)
 	}
-	w = httptest.NewRecorder()
-	s.ServeHTTP(w, httptest.NewRequest("GET", "/boot/bootx64.efi", nil))
-	if w.Code != 200 || w.Body.String() != "boot" {
-		t.Fatal("new TFTP root is unavailable over HTTPS")
+	for _, protocol := range []string{"http", "https"} {
+		t.Run(protocol, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, protocol+"://gateway.home.arpa/boot/boot.ipxe", nil))
+			if w.Code != http.StatusOK || w.Body.String() != script {
+				t.Fatalf("disk boot script unavailable: %d %q", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestBootRootRejectsUnusableDirectoryAtGatewayStartup(t *testing.T) {
+	t.Parallel()
+	manager := testPKI(t)
+	for _, tc := range []struct {
+		name   string
+		nested bool
+	}{
+		{name: "root is a file"},
+		{name: "parent is a file", nested: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			file := filepath.Join(t.TempDir(), "file")
+			if err := os.WriteFile(file, []byte("existing data"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			directory := file
+			if tc.nested {
+				directory = filepath.Join(file, "boot")
+			}
+			_, err := New(Config{
+				Address: "127.0.0.1:0", HTTPAddress: "127.0.0.1:0", Domain: "home.arpa", BootDirectory: directory,
+			}, manager.RootPEM(), manager.GetCertificate, nil)
+			if err == nil || !strings.Contains(err.Error(), "boot directory") {
+				t.Fatalf("unusable boot root accepted at startup: %v", err)
+			}
+			if data, err := os.ReadFile(file); err != nil || string(data) != "existing data" {
+				t.Fatalf("startup modified existing file: %q, %v", data, err)
+			}
+		})
 	}
 }
 

@@ -55,7 +55,7 @@ func parseRequest(packet []byte) (readRequest, *protocolError) {
 	}
 	r.filename = string(fields[0])
 	if !fs.ValidPath(r.filename) || r.filename == "." || strings.Contains(r.filename, "\\") {
-		return r, &protocolError{2, "filename must be a relative path beneath the TFTP root"}
+		return r, &protocolError{2, "filename must be a valid relative path"}
 	}
 	if !strings.EqualFold(string(fields[1]), "octet") {
 		return r, &protocolError{4, "only octet mode is supported"}

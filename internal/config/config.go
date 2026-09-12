@@ -34,6 +34,7 @@ type Config struct {
 	Upstream      string
 	DNSTTL        time.Duration
 	TFTPAddress   string
+	// TFTPDirectory retains the tftp_root setting for public HTTP and HTTPS /boot/ assets.
 	TFTPDirectory string
 	HTTPAddress   string
 	HTTPSAddress  string

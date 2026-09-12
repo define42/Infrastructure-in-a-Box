@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -15,16 +16,21 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
+	"testing/fstest"
 	"time"
+
+	"github.com/define42/Infrastructure-in-a-Box/ipxe"
 )
 
-func startServer(t *testing.T, root string) (*Server, netip.AddrPort, context.CancelFunc, <-chan error) {
+func startServer(t *testing.T, files fs.FS) (*Server, netip.AddrPort, context.CancelFunc, <-chan error) {
 	t.Helper()
-	s, err := New(Config{Address: "127.0.0.1:0", Root: root}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s, err := New(Config{Address: "127.0.0.1:0"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if files != nil {
+		s.files = files
 	}
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -158,15 +164,14 @@ func TestReadFilesAndNegotiateOptions(t *testing.T) {
 	t.Parallel()
 	for _, size := range []int{0, 1, 511, 512, 513, 1024, 4097} {
 		t.Run(strconv.Itoa(size), func(t *testing.T) {
-			root := t.TempDir()
 			want := bytes.Repeat([]byte{0xa5}, size)
-			writeBootFile(t, root, "pxelinux.cfg/default", want)
-			_, address, _, _ := startServer(t, root)
-			data, _, blocks := download(t, address, "pxelinux.cfg/default")
+			files := fstest.MapFS{"pxelinux.0": {Data: want}}
+			_, address, _, _ := startServer(t, files)
+			data, _, blocks := download(t, address, "pxelinux.0")
 			if !bytes.Equal(data, want) || blocks != size/defaultBlockSize+1 {
 				t.Fatalf("incorrect default transfer: bytes %d, blocks %d", len(data), blocks)
 			}
-			data, options, blocks := download(t, address, "pxelinux.cfg/default", "blksize", "1024", "tsize", "0", "timeout", "1", "windowsize", "64")
+			data, options, blocks := download(t, address, "pxelinux.0", "blksize", "1024", "tsize", "0", "timeout", "1", "windowsize", "64")
 			if !bytes.Equal(data, want) || options["tsize"] != strconv.Itoa(size) || options["blksize"] != "1024" || options["timeout"] != "1" || options["windowsize"] != "" || blocks != size/1024+1 {
 				t.Fatalf("incorrect negotiated transfer: bytes %d, options %v, blocks %d", len(data), options, blocks)
 			}
@@ -174,30 +179,45 @@ func TestReadFilesAndNegotiateOptions(t *testing.T) {
 	}
 }
 
-func TestReadOnlyAndRootConfinement(t *testing.T) {
-	t.Parallel()
+func TestServesOnlyBuiltInLoaders(t *testing.T) {
+	// Local files must neither override the embedded loaders nor become public.
+	// Chdir is intentionally restricted to this non-parallel test.
 	dir := t.TempDir()
-	root := filepath.Join(dir, "public")
-	writeBootFile(t, root, "bootx64.efi", []byte("boot"))
-	writeBootFile(t, dir, "secret", []byte("secret"))
-	if err := os.Symlink(filepath.Join(dir, "secret"), filepath.Join(root, "escape")); err != nil {
-		t.Fatal(err)
+	t.Chdir(dir)
+	writeBootFile(t, dir, "pxelinux.0", []byte("disk BIOS loader"))
+	writeBootFile(t, dir, "bootx64.efi", []byte("disk EFI loader"))
+	writeBootFile(t, dir, "boot.ipxe", []byte("private script"))
+	writeBootFile(t, dir, "slax/slax.iso", []byte("private image"))
+	_, address, _, _ := startServer(t, nil)
+	for _, name := range []string{"pxelinux.0", "bootx64.efi"} {
+		t.Run(name, func(t *testing.T) {
+			want, err := fs.ReadFile(ipxe.Files(), name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(want) == 0 {
+				t.Fatal("embedded loader is empty")
+			}
+			got, options, _ := download(t, address, name, "blksize", "1468", "tsize", "0")
+			if !bytes.Equal(got, want) || options["tsize"] != strconv.Itoa(len(want)) {
+				t.Fatalf("embedded loader transfer mismatch: bytes %d, options %v", len(got), options)
+			}
+		})
 	}
-	if err := os.Symlink("bootx64.efi", filepath.Join(root, "inside")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(filepath.Join(root, "directory"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := syscall.Mkfifo(filepath.Join(root, "fifo"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	_, address, _, _ := startServer(t, root)
 	for _, tc := range []struct {
 		name string
 		code uint16
 	}{
-		{"missing", 1}, {"../secret", 2}, {filepath.Join(dir, "secret"), 2}, {"escape", 2}, {"directory", 2}, {"fifo", 2},
+		{"missing", 1},
+		{"boot.ipxe", 1},
+		{"slax/slax.iso", 1},
+		{"slax", 1},
+		{"ipxe.go", 1},
+		{"../pxelinux.0", 2},
+		{"./pxelinux.0", 2},
+		{"slax/../pxelinux.0", 2},
+		{".", 2},
+		{filepath.Join(dir, "bootx64.efi"), 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			conn := udpClient(t, "127.0.0.1")
@@ -208,27 +228,31 @@ func TestReadOnlyAndRootConfinement(t *testing.T) {
 			}
 		})
 	}
-	conn := udpClient(t, "127.0.0.1")
-	request := rrq("uploaded", "octet")
-	request[1] = opWrite
-	send(t, conn, address, request)
-	packet, _ := receive(t, conn)
-	if binary.BigEndian.Uint16(packet) != opError || binary.BigEndian.Uint16(packet[2:]) != 2 {
-		t.Fatalf("write not rejected: %q", packet)
+	for _, name := range []string{"uploaded", "bootx64.efi"} {
+		t.Run("write "+name, func(t *testing.T) {
+			conn := udpClient(t, "127.0.0.1")
+			request := rrq(name, "octet")
+			request[1] = opWrite
+			send(t, conn, address, request)
+			packet, _ := receive(t, conn)
+			if len(packet) < 5 || binary.BigEndian.Uint16(packet) != opError || binary.BigEndian.Uint16(packet[2:]) != 2 {
+				t.Fatalf("write not rejected: %q", packet)
+			}
+		})
 	}
-	if _, err := os.Stat(filepath.Join(root, "uploaded")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "uploaded")); !os.IsNotExist(err) {
 		t.Fatal("WRQ created a file")
 	}
-	if data, _, _ := download(t, address, "inside"); string(data) != "boot" {
-		t.Fatal("confined symlink could not be downloaded")
+	got, err := os.ReadFile(filepath.Join(dir, "bootx64.efi"))
+	if err != nil || string(got) != "disk EFI loader" {
+		t.Fatalf("WRQ changed a local file: %q, %v", got, err)
 	}
 }
 
 func TestRetransmissionDuplicateRRQAndWrongTID(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	writeBootFile(t, root, "boot", []byte("payload"))
-	_, address, _, _ := startServer(t, root)
+	files := fstest.MapFS{"boot": {Data: []byte("payload")}}
+	_, address, _, _ := startServer(t, files)
 	conn := udpClient(t, "127.0.0.1")
 	request := rrq("boot", "octet", "timeout", "1")
 	send(t, conn, address, request)
@@ -285,20 +309,18 @@ func TestExchangeIgnoresStaleACKAndTimesOut(t *testing.T) {
 
 func TestTransferLimitsAndShutdown(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	writeBootFile(t, root, "boot", []byte("payload"))
-	_, address, cancel, done := startServer(t, root)
+	_, address, cancel, done := startServer(t, nil)
 	for i := range maxTransfers {
 		ip := "127.0.0." + strconv.Itoa(2+i/maxClientTransfers)
 		conn := udpClient(t, ip)
-		send(t, conn, address, rrq("boot", "octet"))
+		send(t, conn, address, rrq("pxelinux.0", "octet"))
 		packet, _ := receive(t, conn)
 		if binary.BigEndian.Uint16(packet) != opData {
 			t.Fatalf("transfer %d rejected: %q", i, packet)
 		}
 		if i == maxClientTransfers-1 {
 			extra := udpClient(t, ip)
-			send(t, extra, address, rrq("boot", "octet"))
+			send(t, extra, address, rrq("pxelinux.0", "octet"))
 			packet, _ = receive(t, extra)
 			if binary.BigEndian.Uint16(packet) != opError {
 				t.Fatal("per-client limit exceeded")
@@ -306,7 +328,7 @@ func TestTransferLimitsAndShutdown(t *testing.T) {
 		}
 	}
 	extra := udpClient(t, "127.0.0.100")
-	send(t, extra, address, rrq("boot", "octet"))
+	send(t, extra, address, rrq("pxelinux.0", "octet"))
 	packet, _ := receive(t, extra)
 	if binary.BigEndian.Uint16(packet) != opError {
 		t.Fatal("global transfer limit exceeded")
@@ -322,21 +344,17 @@ func TestTransferLimitsAndShutdown(t *testing.T) {
 	}
 }
 
-func TestServeCreatesRootAndHandlesCancellation(t *testing.T) {
+func TestServeHandlesCancellation(t *testing.T) {
 	t.Parallel()
-	root := filepath.Join(t.TempDir(), "new", "root")
-	_, address, cancel, done := startServer(t, root)
+	_, address, cancel, done := startServer(t, nil)
 	conn := udpClient(t, "127.0.0.1")
 	send(t, conn, address, rrq("missing", "octet"))
 	receive(t, conn)
-	if info, err := os.Stat(root); err != nil || !info.IsDir() {
-		t.Fatalf("root not created: %v", err)
-	}
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(Config{Address: "127.0.0.1:0", Root: root}, nil)
+	s, err := New(Config{Address: "127.0.0.1:0"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,10 +375,11 @@ func TestCurlInteroperability(t *testing.T) {
 	if err != nil || !bytes.Contains(version, []byte("tftp")) {
 		t.Skip("curl has no TFTP support")
 	}
-	root := t.TempDir()
-	want := bytes.Repeat([]byte("PXE payload\x00"), 1000)
-	writeBootFile(t, root, "bootx64.efi", want)
-	_, address, _, _ := startServer(t, root)
+	want, err := fs.ReadFile(ipxe.Files(), "bootx64.efi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, address, _, _ := startServer(t, nil)
 	for _, options := range [][]string{{"--tftp-no-options"}, {"--tftp-blksize", "8192"}} {
 		args := append([]string{"--silent", "--show-error", "--fail", "--max-time", "5", "--noproxy", "*"}, options...)
 		args = append(args, "tftp://"+address.String()+"/bootx64.efi")
@@ -376,14 +395,13 @@ func TestCurlInteroperability(t *testing.T) {
 
 func TestBlockNumberRollover(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
 	// Small negotiated blocks reach the 16-bit rollover without a huge fixture.
 	want := make([]byte, 65536*8+3)
 	for i := range want {
 		want[i] = byte(i % 251)
 	}
-	writeBootFile(t, root, "image", want)
-	_, address, _, _ := startServer(t, root)
+	files := fstest.MapFS{"image": {Data: want}}
+	_, address, _, _ := startServer(t, files)
 	got, _, blocks := download(t, address, "image", "blksize", "8")
 	if blocks != 65537 || !bytes.Equal(got, want) {
 		t.Fatalf("rollover corrupted transfer: blocks %d, bytes %d", blocks, len(got))
@@ -392,19 +410,8 @@ func TestBlockNumberRollover(t *testing.T) {
 
 func TestRunReportsStartupFailures(t *testing.T) {
 	t.Parallel()
-	root := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(root, []byte("not a directory"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	s, err := New(Config{Address: "127.0.0.1:0", Root: root}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Run(t.Context()); err == nil || !strings.Contains(err.Error(), "TFTP root") {
-		t.Fatalf("unusable root accepted: %v", err)
-	}
 	occupied := udpClient(t, "127.0.0.1")
-	s, err = New(Config{Address: occupied.LocalAddr().String(), Root: t.TempDir()}, nil)
+	s, err := New(Config{Address: occupied.LocalAddr().String()}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

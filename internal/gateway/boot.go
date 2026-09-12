@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -9,6 +10,23 @@ import (
 	"syscall"
 	"time"
 )
+
+func prepareBootDirectory(directory string) error {
+	if directory == "" {
+		return nil
+	}
+	if err := os.MkdirAll(directory, 0755); err != nil {
+		return fmt.Errorf("create boot directory: %w", err)
+	}
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		return fmt.Errorf("open boot directory: %w", err)
+	}
+	if err := root.Close(); err != nil {
+		return fmt.Errorf("close boot directory: %w", err)
+	}
+	return nil
+}
 
 func (s *Server) serveBoot(w http.ResponseWriter, request *http.Request) {
 	if request.URL.Path == "/boot" {
@@ -25,7 +43,7 @@ func (s *Server) serveBoot(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	// Open per request so the handler needs no persistent file descriptor and
-	// works when TFTP creates the directory after the gateway is constructed.
+	// serves replacements of the boot directory without restarting the gateway.
 	root, err := os.OpenRoot(s.config.BootDirectory)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {

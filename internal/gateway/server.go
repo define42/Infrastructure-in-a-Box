@@ -32,7 +32,7 @@ type Config struct {
 	Address     string
 	HTTPAddress string
 	Domain      string
-	// BootDirectory optionally exposes the public TFTP root at /boot/.
+	// BootDirectory optionally exposes public boot assets at /boot/ over HTTP and HTTPS.
 	BootDirectory string
 	// ACMEHandler optionally serves /acme/ requests, including signed POSTs.
 	// The handler must support concurrent requests.
@@ -51,8 +51,9 @@ type Server struct {
 	logger         *slog.Logger
 }
 
-// New validates configuration and copies the public root certificate without
-// opening a network socket. getCertificate must support concurrent TLS handshakes.
+// New validates configuration, prepares the boot directory, and copies the public
+// root certificate without opening a network socket. getCertificate must support
+// concurrent TLS handshakes.
 func New(config Config, rootPEM []byte, getCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, error), logger *slog.Logger) (*Server, error) {
 	if err := validateAddress(config.Address, "HTTPS"); err != nil {
 		return nil, err
@@ -99,6 +100,9 @@ func New(config Config, rootPEM []byte, getCertificate func(*tls.ClientHelloInfo
 		Fingerprint string
 	}{hostname, fingerprint}); err != nil {
 		return nil, fmt.Errorf("render gateway page: %w", err)
+	}
+	if err := prepareBootDirectory(config.BootDirectory); err != nil {
+		return nil, err
 	}
 	return &Server{
 		config: config, hostname: hostname, logger: logger, getCertificate: getCertificate,

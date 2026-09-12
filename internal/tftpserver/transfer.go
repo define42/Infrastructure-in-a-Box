@@ -6,14 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/netip"
-	"os"
-	"syscall"
 	"time"
 )
 
-func (s *Server) transfer(ctx context.Context, root *os.Root, local *net.UDPAddr, peer netip.AddrPort, request readRequest) error {
+func (s *Server) transfer(ctx context.Context, local *net.UDPAddr, peer netip.AddrPort, request readRequest) error {
 	ctx, cancel := context.WithTimeout(ctx, maxTransferTime)
 	defer cancel()
 	conn, err := net.ListenUDP("udp4", local)
@@ -28,12 +27,10 @@ func (s *Server) transfer(ctx context.Context, root *os.Root, local *net.UDPAddr
 			<-stopped
 		}
 	}()
-	// os.Root prevents traversal and symlink escapes, including concurrent
-	// renames. Nonblocking open lets us reject FIFOs without hanging shutdown.
-	file, err := root.OpenFile(request.filename, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	file, err := s.files.Open(request.filename)
 	if err != nil {
 		code := uint16(2)
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) {
 			code = 1
 		}
 		s.sendError(conn, peer, code, "file unavailable")
@@ -50,7 +47,7 @@ func (s *Server) transfer(ctx context.Context, root *os.Root, local *net.UDPAddr
 			return err
 		}
 	}
-	// Limit reads to the announced size even if the file grows during transfer.
+	// Limit reads to the announced transfer size.
 	reader := io.LimitReader(file, info.Size())
 	packet := make([]byte, 4+request.blockSize)
 	binary.BigEndian.PutUint16(packet, opData)

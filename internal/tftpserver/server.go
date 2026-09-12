@@ -1,4 +1,4 @@
-// Package tftpserver serves read-only PXE boot files over TFTP.
+// Package tftpserver serves built-in iPXE bootloaders over TFTP.
 package tftpserver
 
 import (
@@ -6,40 +6,38 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/netip"
-	"os"
-	"strings"
 	"sync"
 	"time"
+
+	"github.com/define42/Infrastructure-in-a-Box/ipxe"
 )
 
-// Config supplies a local IPv4 listener and the directory of public boot files.
+// Config supplies a local IPv4 listener for the built-in bootloaders.
 // Production uses server_ip:69. Port zero allows isolated loopback tests.
 type Config struct {
 	Address string
-	Root    string
 }
 
 type Server struct {
 	cfg    Config
 	logger *slog.Logger
+	files  fs.FS
 }
 
-// New validates settings without opening a listener or creating directories.
+// New validates settings and selects the embedded iPXE bootloaders.
 func New(cfg Config, logger *slog.Logger) (*Server, error) {
 	address, err := netip.ParseAddrPort(cfg.Address)
 	if err != nil || !address.Addr().Is4() || (!address.Addr().IsGlobalUnicast() && !address.Addr().IsLoopback()) {
 		return nil, errors.New("TFTP requires a specific unicast IPv4 listener")
 	}
-	if strings.TrimSpace(cfg.Root) == "" {
-		return nil, errors.New("TFTP requires a root directory")
-	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{cfg: cfg, logger: logger}, nil
+	return &Server{cfg: cfg, logger: logger, files: ipxe.Files()}, nil
 }
 
 // Run binds the TFTP request listener and serves until cancellation.
@@ -59,14 +57,6 @@ func (s *Server) Run(ctx context.Context) error {
 // uses its own UDP port, with global and per-client limits on concurrent work.
 func (s *Server) Serve(ctx context.Context, conn *net.UDPConn) error {
 	defer func() { _ = conn.Close() }()
-	if err := os.MkdirAll(s.cfg.Root, 0755); err != nil {
-		return fmt.Errorf("create TFTP root: %w", err)
-	}
-	root, err := os.OpenRoot(s.cfg.Root)
-	if err != nil {
-		return fmt.Errorf("open TFTP root: %w", err)
-	}
-	defer func() { _ = root.Close() }()
 	ctx, cancel := context.WithCancel(ctx)
 	var workers sync.WaitGroup
 	stopped := make(chan struct{})
@@ -86,7 +76,7 @@ func (s *Server) Serve(ctx context.Context, conn *net.UDPConn) error {
 	var mu sync.Mutex
 	active := make(map[netip.AddrPort]bool)
 	clients := make(map[netip.Addr]int)
-	s.logger.Info("TFTP listening", "address", conn.LocalAddr(), "root", s.cfg.Root)
+	s.logger.Info("TFTP listening", "address", conn.LocalAddr(), "files", "built-in iPXE bootloaders")
 	packet := make([]byte, maxRequestSize+1)
 	for {
 		n, peer, err := conn.ReadFromUDPAddrPort(packet)
@@ -143,7 +133,7 @@ func (s *Server) Serve(ctx context.Context, conn *net.UDPConn) error {
 				}
 				mu.Unlock()
 			}()
-			if err := s.transfer(ctx, root, transferAddress, peer, request); err != nil && ctx.Err() == nil {
+			if err := s.transfer(ctx, transferAddress, peer, request); err != nil && ctx.Err() == nil {
 				s.logger.Debug("TFTP transfer ended", "client", peer, "filename", request.filename, "error", err)
 			}
 		})
