@@ -14,11 +14,11 @@ import (
 	"time"
 )
 
-// Config describes a single IPv4 subnet served by DHCP, DNS, and an HTTPS gateway.
+// Config describes a single IPv4 subnet and its infrastructure services.
 // An invalid Router means no default gateway is advertised; an empty LeaseFile
 // disables persistence and an empty Upstream disables external DNS forwarding.
 // Loaded persistence paths are absolute; relative JSON values resolve beside the file.
-// DNSAddress and HTTPSAddress are derived from ServerIP using ports 53 and 443.
+// DNSAddress, HTTPSAddress and TFTPAddress use ServerIP and fixed service ports.
 type Config struct {
 	Interface     string
 	DHCPAddress   string
@@ -33,6 +33,8 @@ type Config struct {
 	LeaseFile     string
 	Upstream      string
 	DNSTTL        time.Duration
+	TFTPAddress   string
+	TFTPDirectory string
 	HTTPSAddress  string
 	CADirectory   string
 	ACMEStateFile string
@@ -97,6 +99,10 @@ func (settings fileSettings) config() (Config, error) {
 	}
 	if err := validateDuration("dns_ttl", cfg.DNSTTL, time.Second); err != nil {
 		return Config{}, err
+	}
+	cfg.TFTPAddress = net.JoinHostPort(cfg.ServerIP.String(), "69")
+	if strings.TrimSpace(cfg.TFTPDirectory) == "" {
+		return Config{}, errors.New("tftp_root must name a directory")
 	}
 	cfg.DNSAddress = net.JoinHostPort(cfg.ServerIP.String(), "53")
 	cfg.HTTPSAddress = net.JoinHostPort(cfg.ServerIP.String(), "443")
@@ -229,6 +235,9 @@ func (c Config) validateListeners() error {
 	}
 	if !dhcp.Addr().IsUnspecified() && dhcp.Addr() != c.ServerIP {
 		return errors.New("dhcp_listen must bind to all ipv4 addresses or server_ip")
+	}
+	if dhcp.Port() == 69 {
+		return errors.New("dhcp_listen conflicts with TFTP on UDP port 69")
 	}
 	if dhcp.Port() == 53 {
 		return errors.New("dhcp_listen conflicts with DNS on UDP port 53")

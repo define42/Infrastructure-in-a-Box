@@ -220,6 +220,7 @@ func (s *Server) reply(request *dhcpv4.DHCPv4, kind dhcpv4.MessageType, allocati
 			modifiers = append(modifiers, dhcpv4.WithRouter(net.IP(s.config.Router.AsSlice())))
 		}
 		if allocation != nil {
+			modifiers = append(modifiers, s.bootOptions(request)...)
 			modifiers = append(modifiers,
 				dhcpv4.WithYourIP(net.IP(allocation.IP.AsSlice())),
 				dhcpv4.WithOption(dhcpv4.OptIPAddressLeaseTime(s.config.LeaseDuration)),

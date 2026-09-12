@@ -9,6 +9,7 @@
   "lease_duration": "12h",
   "lease_file": "/var/lib/infra-box/leases.json",
   "dhcp_listen": ":67",
+  "tftp_root": "/var/lib/infra-box/tftp",
   "upstream": "",
   "dns_ttl": "1m",
   "a_records": {

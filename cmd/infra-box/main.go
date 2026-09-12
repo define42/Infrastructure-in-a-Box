@@ -23,6 +23,7 @@ import (
 	"github.com/define42/Infrastructure-in-a-Box/internal/ldapserver"
 	"github.com/define42/Infrastructure-in-a-Box/internal/lease"
 	"github.com/define42/Infrastructure-in-a-Box/internal/pki"
+	"github.com/define42/Infrastructure-in-a-Box/internal/tftpserver"
 )
 
 func main() {
@@ -62,6 +63,10 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	tftp, err := tftpserver.New(tftpserver.Config{Address: cfg.TFTPAddress, Root: cfg.TFTPDirectory}, logger)
+	if err != nil {
+		return fmt.Errorf("initialize TFTP server: %w", err)
+	}
 	ca, err := newCA(cfg)
 	if err != nil {
 		return err
@@ -76,7 +81,7 @@ func run(logger *slog.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return serve(ctx, dhcp.Run, dns.Run, https.Run, ldap.Run)
+	return serve(ctx, dhcp.Run, dns.Run, tftp.Run, https.Run, ldap.Run)
 }
 
 func newLeaseManager(cfg config.Config) (*lease.Manager, error) {

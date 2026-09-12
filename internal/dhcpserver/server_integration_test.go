@@ -74,15 +74,20 @@ func TestServeDHCPWireLifecycle(t *testing.T) {
 	if _, err := client.Write([]byte("malformed DHCP")); err != nil {
 		t.Fatal(err)
 	}
-	offer := exchange(packet(t, dhcpv4.MessageTypeDiscover, 1, dhcpv4.WithOption(dhcpv4.OptHostName("wire-client"))))
+	offer := exchange(packet(t, dhcpv4.MessageTypeDiscover, 1, dhcpv4.WithOption(dhcpv4.OptHostName("wire-client")), architectureOption(9)))
 	if offer.MessageType() != dhcpv4.MessageTypeOffer {
 		t.Fatal("DISCOVER did not produce OFFER")
 	}
 	ack := exchange(packet(t, dhcpv4.MessageTypeRequest, 1,
 		dhcpv4.WithOption(dhcpv4.OptRequestedIPAddress(offer.YourIPAddr)),
-		dhcpv4.WithOption(dhcpv4.OptServerIdentifier(offer.ServerIdentifier()))))
+		dhcpv4.WithOption(dhcpv4.OptServerIdentifier(offer.ServerIdentifier())), architectureOption(9)))
 	if ack.MessageType() != dhcpv4.MessageTypeAck || !ack.YourIPAddr.Equal(offer.YourIPAddr) {
 		t.Fatal("REQUEST did not acknowledge offered address")
+	}
+	for _, reply := range []*dhcpv4.DHCPv4{offer, ack} {
+		if reply.BootFileName != "bootx64.efi" || reply.BootFileNameOption() != "bootx64.efi" || reply.TFTPServerName() != s.config.ServerIP.String() || ipv4(reply.ServerIPAddr) != s.config.ServerIP {
+			t.Fatal("wire exchange did not advertise this server for PXE boot")
+		}
 	}
 	if _, ok := manager.LookupName("wire-client.home.arpa."); !ok {
 		t.Fatal("wire exchange did not register hostname")

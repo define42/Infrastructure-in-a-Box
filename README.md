@@ -2,8 +2,8 @@
 
 Infrastructure-in-a-Box is a single Go application that provides the core
 services for a private IPv4 network: automatic IP addresses, local DNS names,
-HTTPS certificates, and a directory of users and groups. It brings DHCP, DNS,
-a private certificate authority, ACME, and LDAP together in one process,
+PXE boot files, HTTPS certificates, and a directory of users and groups. It
+brings DHCP, DNS, TFTP, a private certificate authority, ACME, and LDAP together in one process,
 configured through one JSON file.
 
 [![Go version](https://img.shields.io/badge/Go-1.26%2B-00ADD8)](go.mod)
@@ -16,6 +16,7 @@ users through LDAP.
 | Service | What it provides |
 | --- | --- |
 | DHCPv4 | IPv4 leases from one address pool, with DNS and optional router settings sent to clients. |
+| TFTP and PXE | Read-only boot files with DHCP selecting the BIOS or x64 EFI loader from client architecture option 93. |
 | DNS | Local names and reverse lookups for active DHCP leases, static and wildcard A records, and optional forwarding to an upstream resolver. |
 | Private CA and ACME | Certificates for active DHCP hostnames through ACME HTTP-01, plus certificates for the built-in HTTPS and LDAPS services. |
 | HTTPS gateway | A page for downloading the public root CA and checking its fingerprint, plus the ACME API. |
@@ -42,6 +43,7 @@ certificate issuance assumes a trusted private network.
 
 Read on for [getting started](#getting-started), [configuration](#configuration),
 [DHCP and DNS behavior](#lease-and-dns-behavior),
+[PXE network boot](#pxe-network-boot),
 [static DNS records](#static-dns-a-records),
 [the private CA](#https-gateway-and-private-ca),
 [ACME certificates](#acme-certificates-with-http-01),
@@ -115,12 +117,14 @@ suitable operating-system capabilities. Permit client traffic to these ports:
 | --- | --- | --- |
 | DHCP | `:67` on the configured interface | UDP |
 | DNS | `<server_ip>:53` | UDP and TCP |
+| TFTP | `<server_ip>:69` | UDP; each transfer uses an additional ephemeral UDP port |
 | HTTPS gateway and ACME | `<server_ip>:443` | TCP |
 | LDAP | `<server_ip>:389` | Plaintext TCP |
 | LDAPS | `<server_ip>:636` | TLS over TCP |
 
 All services start together, including both LDAP listeners even when no users
-are configured. DNS, HTTPS, LDAP, and LDAPS ports are fixed. Configuration
+are configured. TFTP is always enabled, including when its root directory is
+empty. DNS, TFTP, HTTPS, LDAP, and LDAPS ports are fixed. Configuration
 changes take effect after a restart.
 
 ### Check a client lease
@@ -161,7 +165,7 @@ The maximum file size is 1 MiB.
 | JSON key | Default when omitted | Meaning |
 | --- | --- | --- |
 | `interface` | required | Interface serving DHCP. |
-| `server_ip` | required | Static IPv4 address of this server, also advertised as the DNS server. |
+| `server_ip` | required | Static IPv4 address of this server, also advertised as the DNS and PXE boot server. |
 | `subnet` | required | Canonical IPv4 CIDR subnet, such as `192.168.50.0/24`. |
 | `pool_start` | required | First address in the DHCP pool. |
 | `pool_end` | required | Last address in the DHCP pool, inclusive. |
@@ -169,7 +173,8 @@ The maximum file size is 1 MiB.
 | `domain` | `home.arpa` | Domain for DHCP hostnames. |
 | `lease_duration` | `12h` | Lease lifetime, in whole seconds, at least `1m`. |
 | `lease_file` | `leases.json` | Persisted lease state; set to `""` for memory only. |
-| `dhcp_listen` | `:67` | DHCP UDP listener. |
+| `dhcp_listen` | `:67` | DHCP UDP listener; must not conflict with DNS or TFTP. |
+| `tftp_root` | `tftp` | Directory of public boot files, created if absent. Cannot be empty, contain the configuration or private state, or reside inside `ca_dir`. |
 | `upstream` | `""` | Optional numeric IPv4 address and port for external DNS, such as `1.1.1.1:53`; empty disables forwarding. |
 | `dns_ttl` | `1m` | Maximum TTL for DNS records, in whole seconds, at least `1s`. |
 | `a_records` | `{}` | Exact or wildcard DNS names mapped to IPv4 address strings, including external-name overrides. |
@@ -345,6 +350,66 @@ dig @192.168.50.2 shop.apps.home.arpa A
 dig @192.168.50.2 google.com A
 dig +tcp @192.168.50.2 www.google.com A
 ```
+
+### PXE network boot
+
+The always-enabled TFTP server listens on `<server_ip>:69` and serves files
+beneath `tftp_root`. Relative paths resolve beside the JSON configuration file;
+the default is a sibling directory named `tftp`. The example configuration uses
+`/var/lib/infra-box/tftp`. An absent directory is created at startup, and an
+unusable root or occupied listener stops the application along with its other
+services.
+
+DHCP OFFER and ACK replies select a boot filename from option **93 — Client
+System Architecture**:
+
+| Architecture | Boot filename |
+| --- | --- |
+| 0 — BIOS / x86 | `pxelinux.0` |
+| 7 — EFI BC | `bootx64.efi` |
+| 9 — EFI x86-64 | `bootx64.efi` |
+| Other values, including 6 and 11, or missing/malformed option 93 | No boot filename |
+
+For a client listing multiple architectures, the first supported value wins.
+Replies include the boot-server IPv4 address in `siaddr`, the filename in the
+BOOTP file field, and DHCP options 66 and 67. Ordinary DHCP clients continue to
+receive leases without boot instructions. Boot filenames are advertised even
+if the corresponding files have not yet been installed.
+
+Install your chosen bootloaders and their supporting files in the TFTP root.
+The application does not bundle or download bootloader binaries. For example:
+
+```text
+/var/lib/infra-box/tftp/
+├── pxelinux.0
+├── ldlinux.c32
+├── pxelinux.cfg/
+│   └── default
+├── bootx64.efi
+└── ... bootloader configuration, kernel and initramfs files ...
+```
+
+Use `pxelinux.0` and supporting modules from the same PXELINUX distribution.
+Place an x64 EFI bootloader at `bootx64.efi` and include the configuration and
+other files required by that loader. Select network boot in the client firmware.
+To check a file transfer independently of firmware, run from a client:
+
+```sh
+curl --noproxy '*' tftp://192.168.50.2/pxelinux.0 -o /tmp/pxelinux.0
+```
+
+Transfers use binary (`octet`) mode. The server supports `blksize` (up to 1468
+bytes), `tsize`, and `timeout` negotiation, with standard 512-byte blocks when
+options are absent. Unknown options are omitted. Downloads are read-only and
+restricted to regular files beneath the root; traversal, symlink escapes, and
+uploads are rejected. Keep only public boot assets there. There is no directory
+listing or client authentication.
+
+Permit UDP port 69 and replies from the server's ephemeral transfer ports in
+any firewall between the client and server. The server allows 64 simultaneous
+transfers, at most four per client IP, retries unacknowledged packets up to five
+attempts, and limits each transfer to ten minutes. Cancellation closes the
+listener and active transfers together.
 
 ### HTTPS gateway and private CA
 
@@ -623,7 +688,7 @@ go vet ./...
 
 Unit tests exercise lease allocation, DHCP packet handling, DNS answers,
 certificate generation and renewal, public CA downloads, configuration
-validation, LDAP authentication and directory access, plus ACME signed requests
+validation, PXE architecture selection, LDAP authentication and directory access, plus ACME signed requests
 and HTTP-01 validation policy.
 Integration tests use local sockets on unprivileged
 ports, so they can run without root or changing your network configuration.
@@ -631,6 +696,9 @@ HTTPS tests trust only their generated private root and verify the real TLS
 handshake and certificate downloads.
 LDAP integration tests use loopback sockets and an independent LDAP client to
 exercise binds, searches, group membership, and access restrictions.
+TFTP integration tests exercise real loopback transfers, option negotiation,
+retransmission, root confinement, transfer limits, and shutdown. An independent
+curl interoperability test runs when curl with TFTP support is installed.
 
 The Makefile provides `make build`, `make test`, `make integration`, `make vet`,
 and `make lint`; `make check` runs all of them except the build. The binary is

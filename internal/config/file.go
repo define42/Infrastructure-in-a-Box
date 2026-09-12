@@ -51,7 +51,7 @@ func Load(path string) (Config, error) {
 	}
 	settings := fileSettings{
 		cfg: Config{
-			DHCPAddress: ":67", Domain: "home.arpa", LeaseFile: "leases.json", CADirectory: "pki",
+			DHCPAddress: ":67", Domain: "home.arpa", LeaseFile: "leases.json", CADirectory: "pki", TFTPDirectory: "tftp",
 		},
 		leaseDuration: "12h", dnsTTL: "1m",
 	}
@@ -64,6 +64,7 @@ func Load(path string) (Config, error) {
 	}
 	dir := filepath.Dir(path)
 	cfg.LeaseFile = resolvePath(dir, cfg.LeaseFile)
+	cfg.TFTPDirectory = resolvePath(dir, cfg.TFTPDirectory)
 	cfg.CADirectory = resolvePath(dir, cfg.CADirectory)
 	cfg.ACMEStateFile = resolvePath(dir, cfg.ACMEStateFile)
 	if err := cfg.validatePaths(path); err != nil {
@@ -123,6 +124,7 @@ func (settings *fileSettings) decode(data []byte) error {
 		"upstream":       &settings.cfg.Upstream,
 		"dns_ttl":        &settings.dnsTTL,
 		"ca_dir":         &settings.cfg.CADirectory,
+		"tftp_root":      &settings.cfg.TFTPDirectory,
 		"acme_state":     &settings.cfg.ACMEStateFile,
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -219,5 +221,21 @@ func (c Config) validatePaths(configPath string) error {
 			return fmt.Errorf("configuration file must differ from the %s", target.name)
 		}
 	}
+	// Boot files are public. The root must not contain private state, and it
+	// must not be placed inside the CA directory.
+	for _, target := range append(protected, struct{ name, path string }{"lease_file", c.LeaseFile},
+		struct{ name, path string }{"acme_state", c.ACMEStateFile}) {
+		if target.path != "" && pathWithin(c.TFTPDirectory, target.path) {
+			return fmt.Errorf("tftp_root must not contain the %s", target.name)
+		}
+	}
+	if pathWithin(c.CADirectory, c.TFTPDirectory) {
+		return errors.New("tftp_root must not be inside ca_dir")
+	}
 	return nil
+}
+
+func pathWithin(directory, path string) bool {
+	relative, err := filepath.Rel(directory, path)
+	return err == nil && (relative == "." || filepath.IsLocal(relative))
 }

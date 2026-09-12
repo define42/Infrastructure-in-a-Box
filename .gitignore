@@ -6,3 +6,5 @@
 /config.json
 /.cache/
 /artifacts/
+
+/tftp/
