@@ -22,6 +22,7 @@ import (
 	"github.com/define42/Infrastructure-in-a-Box/internal/gateway"
 	"github.com/define42/Infrastructure-in-a-Box/internal/ldapserver"
 	"github.com/define42/Infrastructure-in-a-Box/internal/lease"
+	"github.com/define42/Infrastructure-in-a-Box/internal/nfsserver"
 	"github.com/define42/Infrastructure-in-a-Box/internal/pki"
 	"github.com/define42/Infrastructure-in-a-Box/internal/tftpserver"
 )
@@ -81,7 +82,11 @@ func run(logger *slog.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return serve(ctx, dhcp.Run, dns.Run, tftp.Run, web.Run, ldap.Run)
+	nfs, err := nfsserver.New(nfsserver.Config{Address: cfg.NFSAddress, Shares: cfg.NFS}, logger)
+	if err != nil {
+		return fmt.Errorf("initialize NFS server: %w", err)
+	}
+	return serve(ctx, dhcp.Run, dns.Run, tftp.Run, web.Run, ldap.Run, nfs.Run)
 }
 
 func newLeaseManager(cfg config.Config) (*lease.Manager, error) {

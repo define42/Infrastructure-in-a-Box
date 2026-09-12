@@ -12,6 +12,10 @@
   "boot_root": "/var/lib/infra-box/tftp",
   "upstream": "",
   "dns_ttl": "1m",
+  "nfs": [
+    { "share": "data", "path": "/var/data", "read_only": false },
+    { "share": "software", "path": "/srv/software", "read_only": true }
+  ],
   "a_records": {
     "printer": "192.168.50.10",
     "nas": "192.168.50.20",

@@ -122,6 +122,7 @@ func TestLoadDefaults(t *testing.T) {
 		HTTPAddress:   "192.168.50.2:80",
 		HTTPSAddress:  "192.168.50.2:443",
 		TFTPAddress:   "192.168.50.2:69",
+		NFSAddress:    "192.168.50.2:2049",
 		BootDirectory: filepath.Join(dir, "tftp"),
 		CADirectory:   filepath.Join(dir, "pki"),
 		ACMEStateFile: filepath.Join(dir, "pki", "acme.json"),

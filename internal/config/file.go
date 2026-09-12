@@ -149,6 +149,13 @@ func (settings *fileSettings) decode(data []byte) error {
 			return fmt.Errorf("duplicate configuration key %q", key)
 		}
 		seen[key] = true
+		if key == "nfs" {
+			settings.cfg.NFS, err = decodeNFS(decoder)
+			if err != nil {
+				return err
+			}
+			continue
+		}
 		if key == "ldap" {
 			settings.cfg.LDAP, err = decodeLDAP(decoder)
 			if err != nil {
@@ -232,7 +239,7 @@ func (c Config) validatePaths(configPath string) error {
 	if pathWithin(c.CADirectory, c.BootDirectory) {
 		return errors.New("boot_root must not be inside ca_dir")
 	}
-	return nil
+	return c.validateNFSPaths(configPath)
 }
 
 func pathWithin(directory, path string) bool {

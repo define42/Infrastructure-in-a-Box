@@ -8,6 +8,7 @@ require (
 	github.com/go-ldap/ldap/v3 v3.4.14
 	github.com/insomniacslk/dhcp v0.0.0-20260901064844-234b97448fae
 	github.com/miekg/dns v1.1.73
+	github.com/smallfz/libnfs-go v0.0.8-0.20260316072047-e8abfd855edc
 	golang.org/x/crypto v0.57.0
 )
 

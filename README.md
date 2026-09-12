@@ -3,7 +3,7 @@
 Infrastructure-in-a-Box is a single Go application that provides the core
 services for a private IPv4 network: automatic IP addresses, local DNS names,
 PXE boot files, HTTPS certificates, and a directory of users and groups. It
-brings DHCP, DNS, TFTP, a private certificate authority, ACME, and LDAP together in one process,
+brings DHCP, DNS, TFTP, a private certificate authority, ACME, LDAP, and optional NFSv4 shares together in one process,
 configured through one JSON file.
 
 [![Go version](https://img.shields.io/badge/Go-1.26%2B-00ADD8)](go.mod)
@@ -21,6 +21,7 @@ users through LDAP.
 | Private CA and ACME | Certificates for active DHCP hostnames through ACME HTTP-01, plus certificates for the built-in HTTPS and LDAPS services. |
 | HTTP and HTTPS gateway | A page for downloading the public root CA and checking its fingerprint, plus read-only boot files. The ACME API uses HTTPS. |
 | LDAP and LDAPS | Password authentication and a read-only directory of configured users and groups. |
+| NFSv4.0 | Optional directory shares with per-share read-only access. |
 
 For example, a laptop joining the network can receive `192.168.50.100` and
 register `laptop.home.arpa`. Other devices can resolve that name immediately.
@@ -99,7 +100,9 @@ chmod 600 config.json
 Edit `config.json` to match your interface, subnet, pool, router, and state
 locations. The example includes every supported top-level setting and stores
 persistent state under `/var/lib/infra-box`. Its LDAP accounts are disabled
-until you set their password hashes and enable them.
+until you set their password hashes and enable them. Create the example NFS
+directories `/var/data` and `/srv/software` before starting, or set `"nfs": []`
+to leave file sharing disabled.
 
 External DNS forwarding is disabled in the example. To resolve public names,
 set `upstream` to your existing resolver's numeric IPv4 address and port, such
@@ -125,11 +128,12 @@ suitable operating-system capabilities. Permit client traffic to these ports:
 | HTTPS gateway and ACME | `<server_ip>:443` | TCP |
 | LDAP | `<server_ip>:389` | Plaintext TCP |
 | LDAPS | `<server_ip>:636` | TLS over TCP |
+| NFSv4.0 | `<server_ip>:2049` | TCP; enabled when `nfs` contains shares |
 
 All services start together, including both LDAP listeners even when no users
 are configured. TFTP always serves the built-in iPXE loaders. Both HTTP and
 HTTPS are always enabled. DNS, TFTP, HTTP, HTTPS, LDAP,
-and LDAPS ports are fixed. Configuration changes take effect after a restart.
+LDAPS, and NFS ports are fixed. Configuration changes take effect after a restart.
 
 ### Check a client lease
 
@@ -160,8 +164,9 @@ the server after editing it.
 
 The file must contain one JSON object using the exact, lowercase keys below.
 Values are strings, including durations and listener addresses, except for
-`a_records`, which maps DNS names to IPv4 strings, and the nested `ldap` object
-described in [LDAP users and groups](#ldap-users-and-groups). Omitted
+`a_records`, which maps DNS names to IPv4 strings, the nested `ldap` object
+described in [LDAP users and groups](#ldap-users-and-groups), and the `nfs` array
+described in [NFS shares](#nfs-shares). Omitted
 optional settings use their defaults. Unknown or duplicate keys, `null`, invalid
 value types, comments, trailing commas, and additional JSON values are rejected.
 The maximum file size is 1 MiB.
@@ -184,10 +189,11 @@ The maximum file size is 1 MiB.
 | `a_records` | `{}` | Exact or wildcard DNS names mapped to IPv4 address strings, including external-name overrides. |
 | `ca_dir` | `pki` | Persistent directory for the private CA and service certificates. |
 | `acme_state` | `<ca_dir>/acme.json` | Persistent ACME accounts, orders, certificates, and revocations; empty also selects this default. Must differ from the lease and CA certificate/key files. |
+| `nfs` | `[]` (disabled) | Directory shares served on `<server_ip>:2049`; see [NFS shares](#nfs-shares). |
 | `ldap` | LDAP on `<server_ip>:389`; LDAPS on `<server_ip>:636` | Directory suffix, users, groups, and search permissions for both always-running listeners. See [LDAP users and groups](#ldap-users-and-groups). |
 
 Durations use Go duration strings such as `"12h"`, `"30m"`, or `"60s"` and must
-represent a whole number of seconds. File and directory paths are resolved
+represent a whole number of seconds. NFS share paths must be absolute. Other file and directory paths are resolved
 relative to the configuration file's directory, including default paths.
 Absolute paths remain unchanged. For example, a file at
 `/etc/infra-box/config.json` with `"ca_dir": "pki"` stores the CA in
@@ -260,7 +266,7 @@ networks; avoid `.local`, which is reserved for
   atomic file replacement; a failed write prevents the corresponding lease
   change from being acknowledged. Only one process may own a lease file.
 - Interrupt or terminate the process with SIGINT or SIGTERM to stop DHCP, DNS,
-  TFTP, HTTP, HTTPS, LDAP, and LDAPS together. A listener failure also stops the
+  TFTP, HTTP, HTTPS, LDAP, LDAPS, and configured NFS shares together. A listener failure also stops the
   other services.
 
 This implementation serves one IPv4 subnet and one address pool. It does not
@@ -608,6 +614,58 @@ CRL distribution points. Applications must explicitly check the CRL for
 revocation to take effect; there is no OCSP responder. This version supports
 HTTP-01 only, with no DNS-01 or TLS-ALPN-01 challenge support.
 
+### NFS shares
+
+Add an optional `nfs` array to the existing top-level JSON object:
+
+```json
+"nfs": [
+  { "share": "data", "path": "/var/data", "read_only": false },
+  { "share": "software", "path": "/srv/software", "read_only": true }
+]
+```
+
+Each `share` names a directory directly below the NFS root. Names are unique,
+case-sensitive, and contain 1–255 ASCII letters, digits, underscores, dots, or
+hyphens, starting with a letter, digit, or underscore. `path` must be an absolute,
+existing directory. `read_only` is a JSON boolean and defaults to `false`.
+Omitting `nfs` or setting it to `[]` disables the listener. No rpcbind, mountd,
+kernel NFS server, or additional server process is required.
+
+Export paths must not overlap, including aliases through symlinks, and must not
+expose configuration, lease state, ACME state, or the private CA directory.
+File operations are confined with Go's `os.Root`; symlinks cannot escape an
+export. Regular files and directories are supported. Creation of symbolic links,
+hard links, and special files is disabled. Read-only shares reject creation,
+writes, truncation, removal, renaming, and permission changes on the server,
+even when a client attempts to mount them read-write.
+
+For example, on a Linux client with NFS client tools installed:
+
+```sh
+sudo mkdir -p /mnt/data /mnt/software
+sudo mount -t nfs -o vers=4.0,proto=tcp,sec=none 192.168.50.2:/data /mnt/data
+sudo mount -t nfs -o vers=4.0,proto=tcp,sec=none,ro 192.168.50.2:/software /mnt/software
+```
+
+This service uses the experimental
+[smallfz/libnfs-go](https://github.com/smallfz/libnfs-go) NFSv4.0 implementation.
+Use it on a trusted network: traffic is unencrypted, all clients have access to
+all configured shares, and filesystem operations run as the server's OS user.
+AUTH_NONE and AUTH_SYS requests are accepted; client UID/GID values do not
+impersonate OS users, and LDAP accounts do not control NFS access. Restrict TCP
+2049 to the intended clients.
+
+This initial implementation supports basic file and directory I/O and size/mode
+changes, with a 1 MiB I/O limit. NFSv4.1/4.2, Kerberos, ACLs, ownership/time
+changes, locking, delegations, exclusive-create verifiers, and share-deny modes
+are unsupported. Open state is scoped to a TCP connection and filehandles are
+in memory; reconnecting or restarting can require remounting. It is unsuitable
+for applications requiring persistent lock/state recovery. The adapter bounds
+connections (64), open files (256 per connection), and filehandles (65,536 per
+server run), closes idle connections after five minutes, and stops compounds
+at their first failing operation.
+
 ### LDAP users and groups
 
 The LDAPv3 server provides authentication and a read-only directory of users and
@@ -753,6 +811,25 @@ exercise binds, searches, group membership, and access restrictions.
 TFTP integration tests exercise real loopback transfers, option negotiation,
 retransmission, built-in file restrictions, transfer limits, and shutdown. An independent
 curl interoperability test runs when curl with TFTP support is installed.
+NFS tests cover real loopback RPC reads/writes, read-only enforcement, compound
+failures, shutdown, path confinement, and stale filehandles without kernel mounts.
+An additional Linux kernel-client test verifies mounting, file reads/writes,
+renaming, directory creation/removal, and read-only shares. Run it explicitly in
+a disposable mount/network namespace (requires `sudo`, `unshare`, `ip`, and the
+Linux NFS client module):
+
+```sh
+nfs_test_binary=$(mktemp /tmp/infra-box-nfs-test.XXXXXX)
+go test -race -c -tags=integration -o "$nfs_test_binary" ./internal/nfsserver
+sudo unshare --mount --net sh -c '
+  mount --make-rprivate / && ip link set lo up &&
+  INFRA_BOX_NFS_KERNEL_TEST=1 "$1" -test.run TestNFSKernelMount -test.v -test.timeout=45s
+' sh "$nfs_test_binary"
+rm -f "$nfs_test_binary"
+```
+
+This opt-in test uses only loopback and refuses to run in the initial mount
+namespace or on a network containing any other interface.
 
 The Makefile provides `make build`, `make test`, `make integration`, `make vet`,
 and `make lint`; `make check` runs all of them except the build. The binary is

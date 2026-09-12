@@ -41,6 +41,8 @@ type Config struct {
 	CADirectory   string
 	ACMEStateFile string
 	LDAP          LDAPConfig
+	NFSAddress    string
+	NFS           []NFSShare
 	// ARecords maps canonical DNS names (including external names and wildcards) to IPv4 addresses.
 	ARecords map[string]netip.Addr
 }
@@ -103,6 +105,10 @@ func (settings fileSettings) config() (Config, error) {
 		return Config{}, err
 	}
 	cfg.TFTPAddress = net.JoinHostPort(cfg.ServerIP.String(), "69")
+	cfg.NFSAddress = net.JoinHostPort(cfg.ServerIP.String(), "2049")
+	if err := ValidateNFSShares(cfg.NFS); err != nil {
+		return Config{}, err
+	}
 	if strings.TrimSpace(cfg.BootDirectory) == "" {
 		return Config{}, errors.New("boot_root must name a directory")
 	}
