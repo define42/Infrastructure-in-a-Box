@@ -126,8 +126,7 @@ suitable operating-system capabilities. Permit client traffic to these ports:
 All services start together, including both LDAP listeners even when no users
 are configured. TFTP is always enabled, including when its root directory is
 empty. Both HTTP and HTTPS are always enabled. DNS, TFTP, HTTP, HTTPS, LDAP,
-and LDAPS ports are fixed. Configuration
-changes take effect after a restart.
+and LDAPS ports are fixed. Configuration changes take effect after a restart.
 
 ### Check a client lease
 
@@ -365,7 +364,8 @@ with directory browsing, HEAD, and byte-range downloads. For example,
 HTTP serves files directly without redirecting to HTTPS. All three protocols
 see file updates without a restart. HTTPS clients must trust the private root CA.
 
-For stock Slax, place the ISO at `tftp_root/slax/slax.iso` and use
+For [stock Slax](https://www.slax.org/en/starting.php), place the ISO at
+`tftp_root/slax/slax.iso` and use
 `from=http://192.168.50.2/boot/slax/slax.iso` in the kernel command line. Use a
 matching kernel and network-enabled initramfs with your PXE bootloader. This HTTP
 URL lets the Slax initramfs fetch its ISO without HTTPS or private CA support.
@@ -424,8 +424,8 @@ public.
 
 Permit UDP port 69 and replies from the server's ephemeral transfer ports, plus
 TCP ports 80 and 443 for web downloads, in any firewall between the client and
-server. The TFTP server allows 64 simultaneous
-transfers, at most four per client IP, retries unacknowledged packets up to five
+server. The TFTP server allows 64 simultaneous transfers, at most four per
+client IP, retries unacknowledged packets up to five
 attempts, and limits each transfer to ten minutes. Cancellation closes the
 listener and active transfers together.
 
@@ -504,8 +504,9 @@ keys. It requests a certificate for its fully qualified DHCP hostname, such as
 `http://laptop.home.arpa/.well-known/acme-challenge/<token>`. The CA connects to
 the client's current leased IPv4 address on **TCP port 80**. Permit that
 connection from the infrastructure server and keep the challenge path available
-for renewal. Port 80 belongs to the requesting client's HTTP listener; the ACME
-API continues to use HTTPS on the gateway.
+for renewal. This callback uses the client's HTTP listener, independently of
+the gateway's own HTTP listener. The ACME API continues to use HTTPS on the
+gateway.
 
 Only active, committed DHCP registrations beneath `domain` can obtain
 certificates. The zone apex, reserved `gateway` and `ns` names, wildcard names,

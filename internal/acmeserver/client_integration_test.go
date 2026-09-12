@@ -143,7 +143,7 @@ func TestStandardACMEClientCertificateLifecycle(t *testing.T) {
 	}
 	active.Store(server)
 	publicGateway, err := gateway.New(gateway.Config{
-		Address: httpsServer.Listener.Addr().String(), Domain: "home.arpa", ACMEHandler: httpsServer.Config.Handler,
+		Address: httpsServer.Listener.Addr().String(), HTTPAddress: "127.0.0.1:0", Domain: "home.arpa", ACMEHandler: httpsServer.Config.Handler,
 	}, ca.RootPEM(), ca.GetCertificate, logger)
 	if err != nil {
 		t.Fatal(err)

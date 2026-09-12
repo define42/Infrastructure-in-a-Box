@@ -32,7 +32,7 @@ func testPKI(t *testing.T) *pki.Manager {
 
 func testServer(t *testing.T, manager *pki.Manager) *Server {
 	t.Helper()
-	server, err := New(Config{Address: "127.0.0.1:0", Domain: "home.arpa"}, manager.RootPEM(),
+	server, err := New(Config{Address: "127.0.0.1:0", HTTPAddress: "127.0.0.1:0", Domain: "home.arpa"}, manager.RootPEM(),
 		manager.GetCertificate, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
@@ -59,7 +59,7 @@ func TestPublicCertificateRoutes(t *testing.T) {
 		t.Run(route.path, func(t *testing.T) {
 			t.Parallel()
 			get := httptest.NewRecorder()
-			server.ServeHTTP(get, httptest.NewRequest(http.MethodGet, route.path, nil))
+			server.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "https://gateway.home.arpa"+route.path, nil))
 			if get.Code != http.StatusOK {
 				t.Fatalf("status = %d", get.Code)
 			}
@@ -90,7 +90,7 @@ func TestPublicCertificateRoutes(t *testing.T) {
 				}
 			}
 			head := httptest.NewRecorder()
-			server.ServeHTTP(head, httptest.NewRequest(http.MethodHead, route.path, nil))
+			server.ServeHTTP(head, httptest.NewRequest(http.MethodHead, "https://gateway.home.arpa"+route.path, nil))
 			if head.Code != get.Code || head.Body.Len() != 0 {
 				t.Errorf("HEAD status/body = %d/%q", head.Code, head.Body.String())
 			}
@@ -140,13 +140,13 @@ func TestACMERoutesPreserveRequests(t *testing.T) {
 		w.Header().Set("Replay-Nonce", "test-nonce")
 		w.WriteHeader(http.StatusCreated)
 	})
-	server, err := New(Config{Address: "127.0.0.1:0", Domain: "home.arpa", ACMEHandler: handler},
+	server, err := New(Config{Address: "127.0.0.1:0", HTTPAddress: "127.0.0.1:0", Domain: "home.arpa", ACMEHandler: handler},
 		manager.RootPEM(), manager.GetCertificate, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	response := httptest.NewRecorder()
-	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/acme/new-order", strings.NewReader("signed JWS")))
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "https://gateway.home.arpa/acme/new-order", strings.NewReader("signed JWS")))
 	if response.Code != http.StatusCreated || response.Header().Get("Replay-Nonce") != "test-nonce" ||
 		receivedBody != "signed JWS" || receivedPath != "/acme/new-order" || receivedMethod != http.MethodPost {
 		t.Fatalf("ACME request not forwarded intact: response=%d method=%q path=%q body=%q", response.Code, receivedMethod, receivedPath, receivedBody)
@@ -157,6 +157,29 @@ func TestACMERoutesPreserveRequests(t *testing.T) {
 		if response.Code != http.StatusMethodNotAllowed {
 			t.Errorf("POST %s escaped gateway method policy: %d", path, response.Code)
 		}
+	}
+}
+
+func TestACMERequiresHTTPS(t *testing.T) {
+	t.Parallel()
+	server := testServer(t, testPKI(t))
+	server.config.ACMEHandler = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("unencrypted ACME request reached the handler")
+	})
+	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost} {
+		t.Run(method, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(method, "http://gateway.home.arpa/acme/directory", nil)
+			// Forwarded headers cannot turn a plaintext request into HTTPS.
+			request.Header.Set("X-Forwarded-Proto", "https")
+			server.ServeHTTP(response, request)
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("HTTP ACME status = %d, want 403", response.Code)
+			}
+			if method == http.MethodHead && response.Body.Len() != 0 {
+				t.Error("HEAD returned a body")
+			}
+		})
 	}
 }
 
@@ -199,9 +222,30 @@ func TestNewRejectsInvalidConfiguration(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := New(Config{Address: test.address, Domain: test.domain}, test.rootPEM, test.provider, nil)
+			_, err := New(Config{Address: test.address, HTTPAddress: "127.0.0.1:0", Domain: test.domain}, test.rootPEM, test.provider, nil)
 			if err == nil {
 				t.Fatal("New accepted invalid configuration")
+			}
+		})
+	}
+}
+
+func TestNewRejectsInvalidHTTPAddress(t *testing.T) {
+	t.Parallel()
+	manager := testPKI(t)
+	for _, tc := range []struct{ name, address string }{
+		{name: "missing", address: ""},
+		{name: "missing port", address: "127.0.0.1"},
+		{name: "hostname", address: "gateway.home.arpa:80"},
+		{name: "multicast", address: "224.0.0.1:80"},
+		{name: "negative port", address: "127.0.0.1:-1"},
+		{name: "port too large", address: "127.0.0.1:65536"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := New(Config{Address: "127.0.0.1:0", HTTPAddress: tc.address, Domain: "home.arpa"},
+				manager.RootPEM(), manager.GetCertificate, nil)
+			if err == nil || !strings.HasPrefix(err.Error(), "HTTP listen") {
+				t.Fatalf("New error = %v, want HTTP address validation failure", err)
 			}
 		})
 	}
@@ -211,7 +255,7 @@ func TestNewCopiesPublicCertificateAndNormalizesDomain(t *testing.T) {
 	t.Parallel()
 	manager := testPKI(t)
 	rootPEM := manager.RootPEM()
-	server, err := New(Config{Address: ":443", Domain: " HOME.ARPA. "}, rootPEM, manager.GetCertificate, nil)
+	server, err := New(Config{Address: ":443", HTTPAddress: ":80", Domain: " HOME.ARPA. "}, rootPEM, manager.GetCertificate, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

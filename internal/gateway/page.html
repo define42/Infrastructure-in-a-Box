@@ -45,7 +45,7 @@
       <ol>
         <li>Download the certificate and compare its SHA-256 fingerprint with the copy provided by your network administrator or on the gateway host.</li>
         <li>Import it into your device’s trusted root certificate authorities. Some browsers use a separate certificate store.</li>
-        <li>Reopen this gateway using the hostname above. Once the root is trusted, your browser can verify the HTTPS certificate.</li>
+        <li>Reopen this gateway at https://{{.Hostname}}/. Once the root is trusted, your browser can verify the HTTPS certificate.</li>
       </ol>
       <p class="note">Trusting this root allows it to authenticate certificates it signs. Verify the fingerprint through a trusted source before installing it; this page alone cannot establish initial trust.</p>
       <p><strong>SHA-256 fingerprint</strong></p>

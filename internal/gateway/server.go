@@ -1,4 +1,4 @@
-// Package gateway serves the local HTTPS gateway and its public root certificate.
+// Package gateway serves the local HTTP and HTTPS gateway and its public root certificate.
 package gateway
 
 import (
@@ -26,10 +26,12 @@ const shutdownTimeout = 5 * time.Second
 //go:embed page.html
 var pageHTML string
 
-// Config configures the gateway listener and the domain containing its hostname.
+// Config configures the gateway listeners and the domain containing its hostname.
 type Config struct {
-	Address string
-	Domain  string
+	// Address is the HTTPS listen address; HTTPAddress serves public routes over HTTP.
+	Address     string
+	HTTPAddress string
+	Domain      string
 	// BootDirectory optionally exposes the public TFTP root at /boot/.
 	BootDirectory string
 	// ACMEHandler optionally serves /acme/ requests, including signed POSTs.
@@ -37,7 +39,7 @@ type Config struct {
 	ACMEHandler http.Handler
 }
 
-// Server serves the HTTPS gateway, public downloads, and optional ACME API.
+// Server serves public pages and downloads over HTTP and HTTPS, and ACME over HTTPS.
 type Server struct {
 	config         Config
 	hostname       string
@@ -52,17 +54,11 @@ type Server struct {
 // New validates configuration and copies the public root certificate without
 // opening a network socket. getCertificate must support concurrent TLS handshakes.
 func New(config Config, rootPEM []byte, getCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, error), logger *slog.Logger) (*Server, error) {
-	host, port, err := net.SplitHostPort(config.Address)
-	if err != nil {
-		return nil, fmt.Errorf("HTTPS listen address: %w", err)
+	if err := validateAddress(config.Address, "HTTPS"); err != nil {
+		return nil, err
 	}
-	if host != "" {
-		if ip, err := netip.ParseAddr(host); err != nil || ip.IsMulticast() {
-			return nil, errors.New("HTTPS listen host must be a literal unicast IP address")
-		}
-	}
-	if number, err := strconv.Atoi(port); err != nil || number < 0 || number > 65535 {
-		return nil, errors.New("HTTPS listen port must be between 0 and 65535")
+	if err := validateAddress(config.HTTPAddress, "HTTP"); err != nil {
+		return nil, err
 	}
 	config.Domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(config.Domain), "."))
 	hostname := "gateway." + config.Domain
@@ -111,6 +107,22 @@ func New(config Config, rootPEM []byte, getCertificate func(*tls.ClientHelloInfo
 	}, nil
 }
 
+func validateAddress(address, protocol string) error {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("%s listen address: %w", protocol, err)
+	}
+	if host != "" {
+		if ip, err := netip.ParseAddr(host); err != nil || ip.IsMulticast() {
+			return fmt.Errorf("%s listen host must be a literal unicast IP address", protocol)
+		}
+	}
+	if number, err := strconv.Atoi(port); err != nil || number < 0 || number > 65535 {
+		return fmt.Errorf("%s listen port must be between 0 and 65535", protocol)
+	}
+	return nil
+}
+
 func validHostname(hostname string) bool {
 	if len(hostname) > 253 {
 		return false
@@ -128,8 +140,8 @@ func validHostname(hostname string) bool {
 	return true
 }
 
-// Run serves HTTPS until cancellation or a serving failure. Cancellation stops
-// requests, closes the listener, and allows at most five seconds for shutdown.
+// Run serves HTTP and HTTPS until cancellation or a serving failure. Cancellation
+// stops requests, closes both listeners, and allows five seconds for shutdown.
 func (s *Server) Run(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return nil
@@ -143,10 +155,29 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("listen for HTTPS gateway: %w", err)
 	}
 	defer func() { _ = listener.Close() }()
-	return s.serve(ctx, listener)
+	httpListener, err := listenConfig.Listen(ctx, "tcp", s.config.HTTPAddress)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		return fmt.Errorf("listen for HTTP gateway: %w", err)
+	}
+	defer func() { _ = httpListener.Close() }()
+	return s.serveListeners(ctx, listener, httpListener)
 }
 
-func (s *Server) serve(ctx context.Context, listener net.Listener) error {
+func (s *Server) serveListeners(ctx context.Context, httpsListener, httpListener net.Listener) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan error, 2)
+	go func() { done <- s.serve(ctx, httpsListener, true) }()
+	go func() { done <- s.serve(ctx, httpListener, false) }()
+	err := <-done
+	cancel()
+	return errors.Join(err, <-done)
+}
+
+func (s *Server) serve(ctx context.Context, listener net.Listener, secure bool) error {
 	defer func() { _ = listener.Close() }()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -163,11 +194,17 @@ func (s *Server) serve(ctx context.Context, listener net.Listener) error {
 		BaseContext:       func(net.Listener) context.Context { return ctx },
 		ErrorLog:          slog.NewLogLogger(s.logger.Handler(), slog.LevelDebug),
 	}
-	// A Shutdown before ServeTLS starts is remembered by http.Server, avoiding
+	// A Shutdown before Serve starts is remembered by http.Server, avoiding
 	// a lost cancellation even if the listener has not yet been registered.
 	done := make(chan error, 1)
-	go func() { done <- server.ServeTLS(listener, "", "") }()
-	s.logger.Info("HTTPS gateway listening", "address", listener.Addr(), "hostname", s.hostname,
+	protocol := "HTTP"
+	if secure {
+		protocol = "HTTPS"
+		go func() { done <- server.ServeTLS(listener, "", "") }()
+	} else {
+		go func() { done <- server.Serve(listener) }()
+	}
+	s.logger.Info(protocol+" gateway listening", "address", listener.Addr(), "hostname", s.hostname,
 		"root_sha256", s.fingerprint)
 	var serveErr error
 	select {
@@ -178,16 +215,16 @@ func (s *Server) serve(ctx context.Context, listener net.Listener) error {
 	shutdownCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 	defer stop()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		s.logger.Debug("HTTPS graceful shutdown", "error", err)
+		s.logger.Debug(protocol+" graceful shutdown", "error", err)
 		if err := server.Close(); err != nil {
-			s.logger.Debug("HTTPS close", "error", err)
+			s.logger.Debug(protocol+" close", "error", err)
 		}
 	}
 	if serveErr == nil {
 		serveErr = <-done
 	}
 	if !errors.Is(serveErr, http.ErrServerClosed) {
-		return fmt.Errorf("serve HTTPS gateway: %w", serveErr)
+		return fmt.Errorf("serve %s gateway: %w", protocol, serveErr)
 	}
 	return nil
 }
@@ -199,9 +236,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+	if request.TLS != nil {
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	if s.config.ACMEHandler != nil && strings.HasPrefix(request.URL.Path, "/acme/") {
+		if request.TLS == nil {
+			s.write(w, request, http.StatusForbidden, "text/plain; charset=utf-8", []byte("ACME requires HTTPS\n"))
+			return
+		}
 		s.config.ACMEHandler.ServeHTTP(w, request)
 		return
 	}
@@ -236,6 +279,6 @@ func (s *Server) write(w http.ResponseWriter, request *http.Request, status int,
 		return
 	}
 	if _, err := w.Write(body); err != nil {
-		s.logger.Debug("write HTTPS response", "error", err)
+		s.logger.Debug("write gateway response", "error", err)
 	}
 }
