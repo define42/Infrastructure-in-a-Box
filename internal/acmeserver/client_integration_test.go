@@ -79,13 +79,16 @@ func TestStandardACMEClientCertificateLifecycle(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
 	registry, err := lease.New(lease.Config{
-		Domain: "home.arpa", PoolStart: netip.MustParseAddr("127.0.0.10"),
+		Domain: "home.arpa", PoolStart: netip.MustParseAddr("127.0.0.1"),
 		PoolEnd: netip.MustParseAddr("127.0.0.20"), LeaseDuration: time.Hour,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := registry.Commit("laptop-client", netip.MustParseAddr("127.0.0.10"), integrationHostname); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Commit("acme-client", netip.MustParseAddr("127.0.0.1"), ""); err != nil {
 		t.Fatal(err)
 	}
 	policy, err := acmevalidate.New(acmevalidate.Config{
@@ -132,7 +135,7 @@ func TestStandardACMEClientCertificateLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverConfig := acmeserver.Config{BaseURL: baseURL, Domain: "home.arpa", StateFile: filepath.Join(caDir, "acme.json")}
+	serverConfig := acmeserver.Config{BaseURL: baseURL, Domain: "home.arpa", StateFile: filepath.Join(caDir, "acme.json"), Leases: registry}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	server, err := acmeserver.New(serverConfig, ca, validator, logger)
 	if err != nil {

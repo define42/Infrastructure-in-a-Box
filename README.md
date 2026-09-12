@@ -471,6 +471,16 @@ file, and back it up together with the CA and lease state. Its permissions are
 server process may own these files. Keep the configured domain and HTTPS origin
 stable so existing clients' account and order URLs continue to work.
 
+Account and order creation requires an active DHCP lease for the connection's
+source address. Each DHCP client may create 8 accounts per rolling 24 hours and
+32 orders per rolling hour, across all its account keys. Each account may create
+32 orders per rolling 24 hours and have at most 32 outstanding orders. These
+limits survive restarts; a `429` response includes `Retry-After`. Invalid orders
+and their authorizations are removed immediately, and their creation still
+counts toward the limits. Accounts expire after 30 idle days once no retained
+orders or certificates reference them. Cleanup runs at startup and on mutations.
+Clients whose accounts have expired must register again.
+
 Certificates can be revoked using the issuing account, the certificate's private
 key, or an active account with valid HTTP-01 authorizations for every certificate
 hostname that still match the current DHCP leases. Signed revocation lists are available

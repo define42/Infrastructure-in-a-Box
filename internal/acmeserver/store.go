@@ -47,6 +47,24 @@ func (s *Server) restore() error {
 	if err := s.validateState(loaded); err != nil {
 		return fmt.Errorf("validate ACME state: %w", err)
 	}
+	// Legacy snapshots have no activity or order-creation history. Use the file
+	// timestamp once, so repeated restarts cannot renew idle accounts forever.
+	for _, o := range loaded.Orders {
+		a := loaded.Accounts[o.AccountID]
+		if a.LastActive.IsZero() && o.Status != "valid" {
+			created := o.Expires.Add(-orderLifetime)
+			if created.After(s.now().Add(-orderLifetime)) && len(a.RecentOrders) < maxAccountOrders {
+				a.RecentOrders = append(a.RecentOrders, created)
+				loaded.Accounts[o.AccountID] = a
+			}
+		}
+	}
+	for id, a := range loaded.Accounts {
+		if a.LastActive.IsZero() {
+			a.LastActive = info.ModTime().UTC()
+			loaded.Accounts[id] = a
+		}
+	}
 	// An interrupted outbound validation proves nothing. Clients may retry it.
 	for id, auth := range loaded.Authorizations {
 		if auth.ChallengeStatus == "processing" {
@@ -66,11 +84,19 @@ func (s *Server) validateState(st state) error {
 		len(st.Accounts) > maxAccounts || len(st.Orders) > maxRecords || len(st.Authorizations) > maxRecords || len(st.Certificates) > maxRecords {
 		return errors.New("invalid or oversized state collections")
 	}
+	if len(st.LeaseLimits) > maxRecords {
+		return errors.New("oversized source lease quotas")
+	}
+	for source, limit := range st.LeaseLimits {
+		if source == "" || len(limit.Accounts) > maxLeaseAccounts || len(limit.Orders) > maxLeaseOrders {
+			return errors.New("invalid source lease quota")
+		}
+	}
 	keys := make(map[string]bool)
 	for id, a := range st.Accounts {
 		thumb, err := acmeauth.Thumbprint(a.Key)
 		if err != nil || !a.Key.IsPublic() || a.ID != id || !validID(id) ||
-			thumb != a.Thumbprint || keys[thumb] || (a.Status != "valid" && a.Status != "deactivated") {
+			thumb != a.Thumbprint || len(a.RecentOrders) > maxAccountOrders || keys[thumb] || (a.Status != "valid" && a.Status != "deactivated") {
 			return errors.New("invalid or duplicate account")
 		}
 		keys[thumb] = true
@@ -164,6 +190,7 @@ func validID(id string) bool {
 }
 
 func (s *Server) commit(next state) error {
+	s.prune(&next)
 	data, err := json.Marshal(next)
 	if err != nil {
 		return fmt.Errorf("encode ACME state: %w", err)
@@ -197,6 +224,7 @@ func (s *Server) commit(next state) error {
 	// Rename is the commit point. Keep memory aligned with disk even if the
 	// directory cannot be synced; still report that durability failure upstream.
 	s.state = next
+	clear(s.activity)
 	d, err := os.Open(dir)
 	if err != nil {
 		return fmt.Errorf("open ACME directory: %w", err)
@@ -226,11 +254,15 @@ func (s *Server) allowedName(name string) bool {
 		name != "gateway."+s.cfg.Domain && name != "ns."+s.cfg.Domain
 }
 
-// Remove expired orders with their dependent records before applying capacity
-// limits. Issued orders remain available until their certificate expires.
+// Prune before capacity checks and every snapshot. Invalid orders and their
+// authorizations are removed immediately; their creation history lives on the
+// account. Issued orders pin their account until the certificate expires.
 func (s *Server) prune(st *state) {
+	now := s.now()
+	referenced := make(map[string]bool)
 	for id, o := range st.Orders {
-		if s.now().Before(o.Expires) {
+		if o.Status != "invalid" && now.Before(o.Expires) {
+			referenced[o.AccountID] = true
 			continue
 		}
 		for _, authID := range o.AuthIDs {
@@ -238,6 +270,26 @@ func (s *Server) prune(st *state) {
 		}
 		delete(st.Certificates, o.CertificateID)
 		delete(st.Orders, id)
+	}
+	for id, a := range st.Accounts {
+		if active := s.activity[id]; active.After(a.LastActive) {
+			a.LastActive = active
+		}
+		if !a.LastActive.IsZero() && !now.Before(a.LastActive.Add(accountIdleLifetime)) && !referenced[id] {
+			delete(st.Accounts, id)
+			continue
+		}
+		a.RecentOrders = recentTimes(a.RecentOrders, now.Add(-orderLifetime))
+		st.Accounts[id] = a
+	}
+	for source, limit := range st.LeaseLimits {
+		limit.Accounts = recentTimes(limit.Accounts, now.Add(-accountRateWindow))
+		limit.Orders = recentTimes(limit.Orders, now.Add(-orderRateWindow))
+		if len(limit.Accounts) == 0 && len(limit.Orders) == 0 {
+			delete(st.LeaseLimits, source)
+		} else {
+			st.LeaseLimits[source] = limit
+		}
 	}
 }
 

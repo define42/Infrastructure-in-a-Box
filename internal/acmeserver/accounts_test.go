@@ -25,7 +25,7 @@ func TestNewAccountPersistsAndFindsExistingAccount(t *testing.T) {
 	key := accountTestKey(t)
 	signed := accountTestRequest(t, key, "", `{"contact":["mailto:admin@example.org"]}`)
 	w := httptest.NewRecorder()
-	s.newAccount(w, signed)
+	s.newAccount(w, signed, "test-device")
 	if w.Code != http.StatusCreated || len(s.state.Accounts) != 1 {
 		t.Fatalf("create account: status %d, body %s", w.Code, w.Body.String())
 	}
@@ -55,14 +55,14 @@ func TestNewAccountPersistsAndFindsExistingAccount(t *testing.T) {
 	}
 	signed.Payload = []byte(`{"onlyReturnExisting":true,"contact":["unsupported:ignored"]}`)
 	w = httptest.NewRecorder()
-	s.newAccount(w, signed)
+	s.newAccount(w, signed, "test-device")
 	if w.Code != http.StatusOK || w.Header().Get("Location") != location || len(s.state.Accounts) != 1 ||
 		s.state.Accounts[id].Contact[0] != "mailto:admin@example.org" {
 		t.Fatalf("existing account lookup changed account: status %d, body %s", w.Code, w.Body.String())
 	}
 	unknown := accountTestRequest(t, accountTestKey(t), "", `{"onlyReturnExisting":true}`)
 	w = httptest.NewRecorder()
-	s.newAccount(w, unknown)
+	s.newAccount(w, unknown, "test-device")
 	accountTestProblem(t, w, http.StatusBadRequest, "accountDoesNotExist")
 }
 
@@ -101,14 +101,14 @@ func TestAccountDeactivationCancelsOutstandingRequests(t *testing.T) {
 	s := accountTestServer(t)
 	key := accountTestKey(t)
 	id := accountTestRegister(t, s, key)
-	s.state.Orders["pending"] = order{ID: "pending", AccountID: id, Status: "pending"}
-	s.state.Orders["issued"] = order{ID: "issued", AccountID: id, Status: "valid"}
+	s.state.Orders["pending"] = order{ID: "pending", AccountID: id, Status: "pending", Expires: s.now().Add(time.Hour), AuthIDs: []string{"auth"}}
+	s.state.Orders["issued"] = order{ID: "issued", AccountID: id, Status: "valid", Expires: s.now().Add(time.Hour)}
 	s.state.Authorizations["auth"] = authorization{ID: "auth", AccountID: id, Status: "pending", ChallengeStatus: "processing"}
 	signed := accountTestRequest(t, key, s.url("/account/"+id), `{"status":"deactivated"}`)
 	w := httptest.NewRecorder()
 	s.account(w, signed, id, id)
-	if w.Code != 200 || s.state.Accounts[id].Status != "deactivated" || s.state.Orders["pending"].Status != "invalid" ||
-		s.state.Authorizations["auth"].Status != "deactivated" || s.state.Orders["issued"].Status != "valid" {
+	if w.Code != 200 || s.state.Accounts[id].Status != "deactivated" || len(s.state.Orders) != 1 ||
+		len(s.state.Authorizations) != 0 || s.state.Orders["issued"].Status != "valid" {
 		t.Fatalf("account deactivation failed: status %d, body %s", w.Code, w.Body.String())
 	}
 	signed.Payload = []byte(`{"status":"valid"}`)
@@ -295,7 +295,7 @@ func accountTestRequest(t *testing.T, key *ecdsa.PrivateKey, kid, payload string
 func accountTestRegister(t *testing.T, s *Server, key *ecdsa.PrivateKey) string {
 	t.Helper()
 	w := httptest.NewRecorder()
-	s.newAccount(w, accountTestRequest(t, key, "", `{}`))
+	s.newAccount(w, accountTestRequest(t, key, "", `{}`), "test-device")
 	if w.Code != 201 {
 		t.Fatalf("register account: status %d, body %s", w.Code, w.Body.String())
 	}

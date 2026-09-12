@@ -5,18 +5,26 @@ import (
 	"context"
 	"crypto/x509"
 	"maps"
+	"net/netip"
 	"time"
 
 	"github.com/define42/Infrastructure-in-a-Box/internal/acmevalidate"
+	"github.com/define42/Infrastructure-in-a-Box/internal/lease"
 	"github.com/go-jose/go-jose/v4"
 )
 
 const (
-	maxAccounts    = 4096
-	maxRecords     = 10000
-	maxIdentifiers = 16
-	orderLifetime  = 24 * time.Hour
-	problemPrefix  = "urn:ietf:params:acme:error:"
+	maxAccounts         = 4096
+	maxAccountOrders    = 32
+	maxLeaseAccounts    = 8
+	maxLeaseOrders      = 32
+	accountIdleLifetime = 30 * 24 * time.Hour
+	accountRateWindow   = 24 * time.Hour
+	orderRateWindow     = time.Hour
+	maxRecords          = 10000
+	maxIdentifiers      = 16
+	orderLifetime       = 24 * time.Hour
+	problemPrefix       = "urn:ietf:params:acme:error:"
 )
 
 // Config supplies a fixed public URL and persistent state location. BaseURL must
@@ -25,6 +33,12 @@ type Config struct {
 	BaseURL   string
 	Domain    string
 	StateFile string
+	Leases    LeaseRegistry
+}
+
+// LeaseRegistry resolves the socket peer to a live committed DHCP lease.
+type LeaseRegistry interface {
+	LookupIP(netip.Addr) (lease.Lease, bool)
 }
 
 // Authority signs client public keys, without receiving their private keys.
@@ -63,11 +77,13 @@ type identifier struct {
 }
 
 type account struct {
-	ID         string          `json:"id"`
-	Key        jose.JSONWebKey `json:"key"`
-	Thumbprint string          `json:"thumbprint"`
-	Status     string          `json:"status"`
-	Contact    []string        `json:"contact,omitempty"`
+	ID           string          `json:"id"`
+	Key          jose.JSONWebKey `json:"key"`
+	Thumbprint   string          `json:"thumbprint"`
+	Status       string          `json:"status"`
+	Contact      []string        `json:"contact,omitempty"`
+	LastActive   time.Time       `json:"last_active"`
+	RecentOrders []time.Time     `json:"recent_orders,omitempty"`
 }
 
 type order struct {
@@ -107,7 +123,13 @@ type certificate struct {
 	Reason    int        `json:"reason,omitempty"`
 }
 
+type leaseLimit struct {
+	Accounts []time.Time `json:"accounts,omitempty"`
+	Orders   []time.Time `json:"orders,omitempty"`
+}
+
 type state struct {
+	LeaseLimits     map[string]leaseLimit    `json:"lease_limits,omitempty"`
 	Version         int                      `json:"version"`
 	Domain          string                   `json:"domain"`
 	RootFingerprint string                   `json:"root_fingerprint"`
@@ -121,6 +143,7 @@ type state struct {
 }
 
 func (s state) clone() state {
+	s.LeaseLimits = maps.Clone(s.LeaseLimits)
 	s.Accounts = maps.Clone(s.Accounts)
 	s.Orders = maps.Clone(s.Orders)
 	s.Authorizations = maps.Clone(s.Authorizations)

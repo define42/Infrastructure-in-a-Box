@@ -84,7 +84,7 @@ func newRevocationFixture(t *testing.T, names ...string) *revocationFixture {
 		t.Fatal(err)
 	}
 	s, err := New(Config{
-		BaseURL: "https://gateway.home.arpa/acme", Domain: "home.arpa", StateFile: filepath.Join(dir, "acme.json"),
+		BaseURL: "https://gateway.home.arpa/acme", Domain: "home.arpa", StateFile: filepath.Join(dir, "acme.json"), Leases: testSourceRegistry{},
 	}, ca, revocationValidator{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)

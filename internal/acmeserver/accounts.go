@@ -20,7 +20,7 @@ type accountInput struct {
 	OnlyReturnExisting bool            `json:"onlyReturnExisting"`
 }
 
-func (s *Server) newAccount(w http.ResponseWriter, signed *acmeauth.Request) {
+func (s *Server) newAccount(w http.ResponseWriter, signed *acmeauth.Request, source string) {
 	if signed.KeyID != "" {
 		s.writeProblem(w, failure(400, "malformed", "new-account requires an embedded public JWK"))
 		return
@@ -33,6 +33,7 @@ func (s *Server) newAccount(w http.ResponseWriter, signed *acmeauth.Request) {
 	s.mu.Lock()
 	for _, a := range s.state.Accounts {
 		if a.Thumbprint == signed.Thumbprint {
+			s.touchAccount(a.ID)
 			s.mu.Unlock()
 			w.Header().Set("Location", s.url("/account/"+a.ID))
 			s.writeJSON(w, http.StatusOK, s.accountView(a))
@@ -50,9 +51,15 @@ func (s *Server) newAccount(w http.ResponseWriter, signed *acmeauth.Request) {
 		s.writeProblem(w, p)
 		return
 	}
-	if len(s.state.Accounts) >= maxAccounts {
+	if !s.allowCreation(w, source, true) {
 		s.mu.Unlock()
-		s.writeProblem(w, failure(429, "rateLimited", "the certificate authority has reached its account limit"))
+		return
+	}
+	next := s.state.clone()
+	s.prune(&next)
+	if len(next.Accounts) >= maxAccounts {
+		s.mu.Unlock()
+		s.rateLimited(w, accountIdleLifetime, "the certificate authority has reached its account limit")
 		return
 	}
 	id, err := randomID()
@@ -61,8 +68,8 @@ func (s *Server) newAccount(w http.ResponseWriter, signed *acmeauth.Request) {
 		s.internalError(w, err)
 		return
 	}
-	a := account{ID: id, Key: signed.Key, Thumbprint: signed.Thumbprint, Status: "valid", Contact: contact}
-	next := s.state.clone()
+	a := account{LastActive: s.now().UTC(), ID: id, Key: signed.Key, Thumbprint: signed.Thumbprint, Status: "valid", Contact: contact}
+	s.recordCreation(&next, source, true)
 	next.Accounts[id] = a
 	err = s.commit(next)
 	s.mu.Unlock()
@@ -228,6 +235,7 @@ func (s *Server) activeAccount(signed *acmeauth.Request, accountID string) (acco
 	if !ok || a.Status != "valid" || a.Thumbprint != signed.Thumbprint || signed.KeyID != s.url("/account/"+accountID) {
 		return account{}, failure(403, "unauthorized", "account is not active or its key has changed")
 	}
+	s.touchAccount(accountID)
 	return a, nil
 }
 

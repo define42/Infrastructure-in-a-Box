@@ -121,7 +121,7 @@ func newGateway(cfg config.Config, ca *pki.Manager, leases *lease.Manager, logge
 		return nil, fmt.Errorf("initialize ACME validation: %w", err)
 	}
 	acme, err := acmeserver.New(acmeserver.Config{
-		BaseURL: baseURL, Domain: cfg.Domain, StateFile: cfg.ACMEStateFile,
+		BaseURL: baseURL, Domain: cfg.Domain, StateFile: cfg.ACMEStateFile, Leases: leases,
 	}, ca, validator, logger)
 	if err != nil {
 		return nil, fmt.Errorf("initialize ACME server: %w", err)

@@ -28,6 +28,7 @@ import (
 // immutable snapshots so failed persistence never publishes successful changes.
 type Server struct {
 	mu          sync.Mutex
+	activity    map[string]time.Time
 	cfg         Config
 	ca          Authority
 	validator   Validator
@@ -49,6 +50,9 @@ func New(cfg Config, ca Authority, validator Validator, logger *slog.Logger) (*S
 	cfg.Domain = strings.ToLower(strings.TrimSuffix(cfg.Domain, "."))
 	if lease.NormalizeHostname("gateway", cfg.Domain) == "" || cfg.StateFile == "" {
 		return nil, errors.New("ACME requires a valid domain and persistent state file")
+	}
+	if cfg.Leases == nil {
+		return nil, errors.New("ACME requires a source lease registry")
 	}
 	if ca == nil || validator == nil {
 		return nil, errors.New("ACME requires a signing authority and challenge validator")
@@ -136,6 +140,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.writeProblem(w, failure(405, "malformed", "this ACME resource requires a signed POST"))
 		return
 	}
+	source := ""
+	if path == "/new-account" || path == "/new-order" {
+		var p *problem
+		source, p = s.sourceLease(r)
+		if p != nil {
+			s.writeProblem(w, p)
+			return
+		}
+	}
 	signed, err := s.auth.Verify(r, s.url(path))
 	if err != nil {
 		var authErr *acmeauth.Error
@@ -147,7 +160,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if path == "/new-account" {
-		s.newAccount(w, signed)
+		s.newAccount(w, signed, source)
 		return
 	}
 	if path == "/revoke-cert" {
@@ -179,7 +192,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case path == "/new-order":
-		s.newOrder(w, signed, accountID)
+		s.newOrder(w, signed, accountID, source)
 	case path == "/key-change":
 		s.keyChange(w, signed, accountID)
 	case strings.HasPrefix(path, "/account/"):

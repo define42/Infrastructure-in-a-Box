@@ -73,7 +73,7 @@ func setupOrders(t *testing.T) orderFixture {
 		t.Fatal(err)
 	}
 	v := &orderValidator{target: acmevalidate.Target{IP: netip.MustParseAddr("192.0.2.10"), ClientID: "device-1"}}
-	s, err := New(Config{BaseURL: "https://gateway.home.arpa/acme", Domain: "home.arpa", StateFile: filepath.Join(dir, "acme.json")}, ca, v, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s, err := New(Config{BaseURL: "https://gateway.home.arpa/acme", Domain: "home.arpa", StateFile: filepath.Join(dir, "acme.json"), Leases: testSourceRegistry{}}, ca, v, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func setupOrders(t *testing.T) orderFixture {
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()
-	s.newAccount(rec, &acmeauth.Request{Key: jwk, Thumbprint: thumb, Payload: []byte("{}")})
+	s.newAccount(rec, &acmeauth.Request{Key: jwk, Thumbprint: thumb, Payload: []byte("{}")}, "test-device")
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("register: %d %s", rec.Code, rec.Body.String())
 	}
@@ -118,7 +118,7 @@ func (f orderFixture) create(t *testing.T, names ...string) order {
 		ids = append(ids, identifier{Type: "dns", Value: name})
 	}
 	rec := httptest.NewRecorder()
-	f.s.newOrder(rec, f.request(t, map[string]any{"identifiers": ids}), f.a.ID)
+	f.s.newOrder(rec, f.request(t, map[string]any{"identifiers": ids}), f.a.ID, "test-device")
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("new order: %d %s", rec.Code, rec.Body.String())
 	}
@@ -197,7 +197,7 @@ func TestOrderRejectsIdentifierPolicy(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := setupOrders(t)
 			rec := httptest.NewRecorder()
-			f.s.newOrder(rec, f.request(t, map[string]any{"identifiers": []identifier{{Type: "dns", Value: name}}}), f.a.ID)
+			f.s.newOrder(rec, f.request(t, map[string]any{"identifiers": []identifier{{Type: "dns", Value: name}}}), f.a.ID, "test-device")
 			if rec.Code != http.StatusBadRequest || len(f.s.state.Orders) != 0 {
 				t.Fatalf("identifier accepted: %d %s", rec.Code, rec.Body.String())
 			}
@@ -228,7 +228,7 @@ func TestOrderRejectsLDAPService(t *testing.T) {
 	for _, name := range []string{"ldap.home.arpa", "LDAP.HOME.ARPA."} {
 		t.Run(name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			f.s.newOrder(rec, f.request(t, map[string]any{"identifiers": []identifier{{Type: "dns", Value: name}}}), f.a.ID)
+			f.s.newOrder(rec, f.request(t, map[string]any{"identifiers": []identifier{{Type: "dns", Value: name}}}), f.a.ID, "test-device")
 			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "rejectedIdentifier") || len(f.s.state.Orders) != 0 {
 				t.Fatalf("built-in LDAP identity accepted: %d %s", rec.Code, rec.Body.String())
 			}
@@ -381,7 +381,7 @@ func TestPersistenceFailureDoesNotPublishOrder(t *testing.T) {
 	f := setupOrders(t)
 	f.s.cfg.StateFile = filepath.Join(f.s.cfg.StateFile, "not-a-directory")
 	rec := httptest.NewRecorder()
-	f.s.newOrder(rec, f.request(t, map[string]any{"identifiers": []identifier{{Type: "dns", Value: "host.home.arpa"}}}), f.a.ID)
+	f.s.newOrder(rec, f.request(t, map[string]any{"identifiers": []identifier{{Type: "dns", Value: "host.home.arpa"}}}), f.a.ID, "test-device")
 	if rec.Code != http.StatusInternalServerError || len(f.s.state.Orders) != 0 {
 		t.Fatalf("failed snapshot published: %d", rec.Code)
 	}

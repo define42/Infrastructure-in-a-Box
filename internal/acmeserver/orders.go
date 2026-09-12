@@ -10,7 +10,7 @@ import (
 	"github.com/define42/Infrastructure-in-a-Box/internal/pki"
 )
 
-func (s *Server) newOrder(w http.ResponseWriter, signed *acmeauth.Request, accountID string) {
+func (s *Server) newOrder(w http.ResponseWriter, signed *acmeauth.Request, accountID, source string) {
 	var body struct {
 		Identifiers []identifier `json:"identifiers"`
 		NotBefore   string       `json:"notBefore"`
@@ -50,6 +50,9 @@ func (s *Server) newOrder(w http.ResponseWriter, signed *acmeauth.Request, accou
 		s.writeProblem(w, p)
 		return
 	}
+	if !s.allowCreation(w, source, false) {
+		return
+	}
 	next := s.state.clone()
 	s.prune(&next)
 	pending := 0
@@ -58,9 +61,8 @@ func (s *Server) newOrder(w http.ResponseWriter, signed *acmeauth.Request, accou
 			pending++
 		}
 	}
-	if pending >= 32 || len(next.Orders) >= maxRecords || len(next.Authorizations)+len(body.Identifiers) > maxRecords {
-		w.Header().Set("Retry-After", "3600")
-		s.writeProblem(w, failure(429, "rateLimited", "too many outstanding orders"))
+	if pending >= maxAccountOrders || len(next.Accounts[accountID].RecentOrders) >= maxAccountOrders || len(next.Orders) >= maxRecords || len(next.Authorizations)+len(body.Identifiers) > maxRecords {
+		s.rateLimited(w, orderLifetime, "too many recent or outstanding orders")
 		return
 	}
 	id, err := randomID()
@@ -87,6 +89,10 @@ func (s *Server) newOrder(w http.ResponseWriter, signed *acmeauth.Request, accou
 		o.AuthIDs = append(o.AuthIDs, authID)
 	}
 	next.Orders[id] = o
+	a := next.Accounts[accountID]
+	a.RecentOrders = append(a.RecentOrders, s.now().UTC())
+	next.Accounts[accountID] = a
+	s.recordCreation(&next, source, false)
 	if err := s.commit(next); err != nil {
 		s.internalError(w, err)
 		return
