@@ -85,6 +85,9 @@ func TestServeDHCPWireLifecycle(t *testing.T) {
 		t.Fatal("REQUEST did not acknowledge offered address")
 	}
 	for _, reply := range []*dhcpv4.DHCPv4{offer, ack} {
+		if servers := reply.NTPServers(); len(servers) != 1 || ipv4(servers[0]) != s.config.ServerIP {
+			t.Fatalf("wire exchange advertised incorrect NTP servers: %v", servers)
+		}
 		if reply.BootFileName != "bootx64.efi" || reply.BootFileNameOption() != "bootx64.efi" || reply.TFTPServerName() != s.config.ServerIP.String() || ipv4(reply.ServerIPAddr) != s.config.ServerIP {
 			t.Fatal("wire exchange did not advertise this server for PXE boot")
 		}

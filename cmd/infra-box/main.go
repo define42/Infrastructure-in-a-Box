@@ -23,6 +23,7 @@ import (
 	"github.com/define42/Infrastructure-in-a-Box/internal/ldapserver"
 	"github.com/define42/Infrastructure-in-a-Box/internal/lease"
 	"github.com/define42/Infrastructure-in-a-Box/internal/nfsserver"
+	"github.com/define42/Infrastructure-in-a-Box/internal/ntpserver"
 	"github.com/define42/Infrastructure-in-a-Box/internal/pki"
 	"github.com/define42/Infrastructure-in-a-Box/internal/tftpserver"
 )
@@ -68,6 +69,10 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("initialize TFTP server: %w", err)
 	}
+	ntp, err := ntpserver.New(ntpserver.Config{Address: cfg.NTPAddress}, logger)
+	if err != nil {
+		return fmt.Errorf("initialize NTP server: %w", err)
+	}
 	ca, err := newCA(cfg)
 	if err != nil {
 		return err
@@ -86,7 +91,7 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("initialize NFS server: %w", err)
 	}
-	return serve(ctx, dhcp.Run, dns.Run, tftp.Run, web.Run, ldap.Run, nfs.Run)
+	return serve(ctx, dhcp.Run, dns.Run, tftp.Run, ntp.Run, web.Run, ldap.Run, nfs.Run)
 }
 
 func newLeaseManager(cfg config.Config) (*lease.Manager, error) {

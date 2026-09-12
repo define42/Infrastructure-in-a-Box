@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 Infrastructure-in-a-Box provides local network infrastructure for air-gapped
-workshops and labs. It combines DHCP, DNS, TFTP and PXE boot services, HTTPS,
+workshops and labs. It combines DHCP, DNS, NTP, TFTP and PXE boot services, HTTPS,
 a private certificate authority, ACME, LDAP, and optional NFSv4 shares in one
 Go application, configured through a single JSON file.
 
@@ -16,12 +16,13 @@ planned; the current build and setup instructions are provided below.
 
 Devices on the network can obtain IP addresses, find one another by name,
 boot from local files, use certificates from a shared private CA, authenticate
-users through LDAP, and access shared files over NFS. These services also suit
-private home networks and connected labs.
+users through LDAP, synchronize clocks with the host, and access shared files
+over NFS. These services also suit private home networks and connected labs.
 
 | Service | What it provides |
 | --- | --- |
-| DHCPv4 | IPv4 leases from one address pool, with DNS and optional router settings sent to clients. |
+| DHCPv4 | IPv4 leases from one address pool, with DNS, NTP, and optional router settings sent to clients. |
+| NTP | Always-on local time service using the host clock, advertised automatically through DHCP. |
 | TFTP and PXE | Built-in iPXE loaders with DHCP selecting the BIOS or x64 EFI loader from client architecture option 93. |
 | DNS | Local names and reverse lookups for active DHCP leases, static and wildcard A records, and optional forwarding to an upstream resolver. |
 | Private CA and ACME | Certificates for active DHCP hostnames through ACME HTTP-01, plus certificates for the built-in HTTPS and LDAPS services. |
@@ -129,6 +130,7 @@ suitable operating-system capabilities. Permit client traffic to these ports:
 | --- | --- | --- |
 | DHCP | `:67` on the configured interface | UDP |
 | DNS | `<server_ip>:53` | UDP and TCP |
+| NTP | `<server_ip>:123` | UDP |
 | TFTP | `<server_ip>:69` | UDP; each transfer uses an additional ephemeral UDP port |
 | HTTP gateway | `<server_ip>:80` | TCP |
 | HTTPS gateway and ACME | `<server_ip>:443` | TCP |
@@ -137,8 +139,8 @@ suitable operating-system capabilities. Permit client traffic to these ports:
 | NFSv4.0 | `<server_ip>:2049` | TCP; enabled when `nfs` contains shares |
 
 All services start together, including both LDAP listeners even when no users
-are configured. TFTP always serves the built-in iPXE loaders. Both HTTP and
-HTTPS are always enabled. DNS, TFTP, HTTP, HTTPS, LDAP,
+are configured. TFTP always serves the built-in iPXE loaders. HTTP, HTTPS,
+and NTP are always enabled. DNS, NTP, TFTP, HTTP, HTTPS, LDAP,
 LDAPS, and NFS ports are fixed. Configuration changes take effect after a restart.
 
 ### Check a client lease
@@ -188,7 +190,7 @@ The maximum file size is 1 MiB.
 | `domain` | `home.arpa` | Domain for DHCP hostnames. |
 | `lease_duration` | `12h` | Lease lifetime, in whole seconds, at least `1m`. |
 | `lease_file` | `leases.json` | Persisted lease state; set to `""` for memory only. |
-| `dhcp_listen` | `:67` | DHCP UDP listener; must not conflict with DNS or TFTP. |
+| `dhcp_listen` | `:67` | DHCP UDP listener; must not conflict with DNS, NTP, or TFTP. |
 | `boot_root` | `tftp` | Directory of public HTTP/HTTPS `/boot/` files, created if absent; TFTP serves only built-in loaders. Cannot be empty, contain the configuration or private state, or reside inside `ca_dir`. |
 | `upstream` | `""` | Optional numeric IPv4 address and port for external DNS, such as `1.1.1.1:53`; empty disables forwarding. |
 | `dns_ttl` | `1m` | Maximum TTL for DNS records, in whole seconds, at least `1s`. |
@@ -272,7 +274,7 @@ networks; avoid `.local`, which is reserved for
   atomic file replacement; a failed write prevents the corresponding lease
   change from being acknowledged. Only one process may own a lease file.
 - Interrupt or terminate the process with SIGINT or SIGTERM to stop DHCP, DNS,
-  TFTP, HTTP, HTTPS, LDAP, LDAPS, and configured NFS shares together. A listener failure also stops the
+  NTP, TFTP, HTTP, HTTPS, LDAP, LDAPS, and configured NFS shares together. A listener failure also stops the
   other services.
 
 This implementation serves one IPv4 subnet and one address pool. It does not
@@ -280,6 +282,28 @@ provide DHCPv6, static reservations, dynamic DNS UPDATE, DNSSEC validation, or
 automatic ICMP/ARP probing for conflicting addresses. Client hostnames are
 client-supplied labels, not authenticated identities. Configure the pool to
 exclude all other equipment with static addresses.
+
+### Local time with NTP
+
+The NTP server always listens on `<server_ip>:123` over UDP. No additional JSON
+settings are needed. It serves the host's system clock as a stratum-10 local
+reference, allowing workshop and lab clients to share a clock without Internet
+access. Set the host's date and time correctly before starting the lab. The
+application does not adjust the host clock, contact upstream time servers, or
+verify its accuracy against UTC; clients inherit the host's clock errors and drift.
+
+DHCP automatically advertises `server_ip` through
+[option 42 (NTP servers)](https://www.rfc-editor.org/rfc/rfc2132.html#section-8.3)
+in OFFER and ACK replies, including renewals and INFORM responses. Existing
+clients receive the setting when they renew their leases. Their network manager
+and time synchronization service must support DHCP-provided NTP servers;
+otherwise, configure the time service to use `server_ip` explicitly.
+
+The server supports basic unauthenticated NTPv3 and NTPv4 unicast client requests.
+It does not support broadcast, peering, control queries, authentication, or NTS.
+Permit UDP port 123 from the intended lab clients. Another NTP daemon must not
+occupy that address and port; a bind failure stops the application alongside its
+other services.
 
 ### Static DNS A records
 
@@ -814,6 +838,9 @@ HTTPS tests trust only their generated private root and verify the real TLS
 handshake and certificate downloads.
 LDAP integration tests use loopback sockets and an independent LDAP client to
 exercise binds, searches, group membership, and access restrictions.
+NTP tests cover timestamp encoding and the 2036 era rollover, NTPv3/v4 loopback
+exchanges, invalid packet rejection, listener failures, and cancellation. DHCP
+tests verify the NTP advertisement in offers, acknowledgements, renewals, and INFORM replies.
 TFTP integration tests exercise real loopback transfers, option negotiation,
 retransmission, built-in file restrictions, transfer limits, and shutdown. An independent
 curl interoperability test runs when curl with TFTP support is installed.

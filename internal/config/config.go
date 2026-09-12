@@ -18,7 +18,8 @@ import (
 // An invalid Router means no default gateway is advertised; an empty LeaseFile
 // disables persistence and an empty Upstream disables external DNS forwarding.
 // Loaded persistence paths are absolute; relative JSON values resolve beside the file.
-// DNSAddress, HTTPAddress, HTTPSAddress and TFTPAddress use ServerIP and fixed service ports.
+// DNSAddress, HTTPAddress, HTTPSAddress, TFTPAddress and NTPAddress use ServerIP
+// and fixed service ports.
 type Config struct {
 	Interface     string
 	DHCPAddress   string
@@ -34,6 +35,7 @@ type Config struct {
 	Upstream      string
 	DNSTTL        time.Duration
 	TFTPAddress   string
+	NTPAddress    string
 	// BootDirectory contains public files served over HTTP and HTTPS at /boot/.
 	BootDirectory string
 	HTTPAddress   string
@@ -105,6 +107,7 @@ func (settings fileSettings) config() (Config, error) {
 		return Config{}, err
 	}
 	cfg.TFTPAddress = net.JoinHostPort(cfg.ServerIP.String(), "69")
+	cfg.NTPAddress = net.JoinHostPort(cfg.ServerIP.String(), "123")
 	cfg.NFSAddress = net.JoinHostPort(cfg.ServerIP.String(), "2049")
 	if err := ValidateNFSShares(cfg.NFS); err != nil {
 		return Config{}, err
@@ -250,6 +253,9 @@ func (c Config) validateListeners() error {
 	}
 	if dhcp.Port() == 53 {
 		return errors.New("dhcp_listen conflicts with DNS on UDP port 53")
+	}
+	if dhcp.Port() == 123 {
+		return errors.New("dhcp_listen conflicts with NTP on UDP port 123")
 	}
 	if c.Upstream == "" {
 		return nil

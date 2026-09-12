@@ -213,6 +213,7 @@ func (s *Server) reply(request *dhcpv4.DHCPv4, kind dhcpv4.MessageType, allocati
 			dhcpv4.WithClientIP(request.ClientIPAddr),
 			dhcpv4.WithNetmask(net.CIDRMask(s.config.Subnet.Bits(), 32)),
 			dhcpv4.WithDNS(net.IP(s.config.ServerIP.AsSlice())),
+			dhcpv4.WithOption(dhcpv4.OptNTPServers(net.IP(s.config.ServerIP.AsSlice()))),
 			dhcpv4.WithOption(dhcpv4.OptDomainName(s.config.Domain)),
 			dhcpv4.WithDomainSearchList(s.config.Domain),
 		)
