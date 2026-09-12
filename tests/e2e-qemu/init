@@ -26,11 +26,25 @@ wait_file() {
     done
 }
 start_client() {
-    rm -f /run/bound /run/renew
+    rm -f /run/bound /run/renew /run/lease-address
     udhcpc -f -i eth0 -s /dhcp-hook -x hostname:client1 -t 5 -T 2 &
     client=$!
     wait_file /run/bound
 }
+
+# Only the HTTP boot script supplies this unpredictable kernel argument.
+# A direct kernel boot or a different boot script cannot satisfy this check.
+case " $(cat /proc/cmdline) " in
+    *" e2e_boot=$(cat /boot-token) "*) ;;
+    *) fail 'HTTP boot script token missing from kernel command line' ;;
+esac
+mode=$(cat /boot-mode)
+case "$mode" in
+    bios) [ ! -d /sys/firmware/efi ] || fail 'expected BIOS firmware' ;;
+    uefi) [ -d /sys/firmware/efi ] || fail 'expected UEFI firmware' ;;
+    *) fail "unexpected firmware mode: $mode" ;;
+esac
+echo "E2E BOOT $mode $(cat /boot-token)"
 
 modprobe virtio_net || fail 'virtio_net module'
 ip link set lo up || fail 'loopback'

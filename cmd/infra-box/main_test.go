@@ -33,7 +33,7 @@ func TestNewGatewayInitializesCAAndACME(t *testing.T) {
 		"lease_duration": "1h",
 		"lease_file": "state/leases.json",
 		"ca_dir": "state/pki",
-		"tftp_root": "assets/pxe"
+		"boot_root": "assets/pxe"
 	}`)
 	if err := os.WriteFile(configPath, data, 0o600); err != nil {
 		t.Fatal(err)
@@ -62,7 +62,7 @@ func TestNewGatewayInitializesCAAndACME(t *testing.T) {
 			t.Fatal(err)
 		}
 		// The gateway owns creating the HTTP boot directory; TFTP uses embedded files.
-		if err := os.WriteFile(filepath.Join(cfg.TFTPDirectory, "boot.ipxe"), []byte("#!ipxe\nboot\n"), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(cfg.BootDirectory, "boot.ipxe"), []byte("#!ipxe\nboot\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
 		request := httptest.NewRequest(http.MethodGet, "https://gateway.home.arpa/acme/directory", nil)

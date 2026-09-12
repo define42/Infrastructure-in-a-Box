@@ -15,7 +15,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,7 +29,43 @@ import (
 
 const hostname = "client1.home.arpa"
 
+func leaseAddress(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile("/run/lease-address")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := strings.TrimSpace(string(data))
+	if ip, err := netip.ParseAddr(address); err != nil || !ip.Is4() {
+		t.Fatalf("invalid DHCP lease address %q: %v", address, err)
+	}
+	return address
+}
+
+func TestDHCPAddress(t *testing.T) {
+	want := leaseAddress(t) + "/24"
+	iface, err := net.InterfaceByName("eth0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addresses, err := iface.Addrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, address := range addresses {
+		if address.String() == want {
+			return
+		}
+	}
+	t.Fatalf("DHCP-assigned address %s is missing from eth0: %v", want, addresses)
+}
+
 func TestDNS(t *testing.T) {
+	address := leaseAddress(t)
+	reverse, err := dns.ReverseAddr(address)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, network := range []string{"udp", "tcp"} {
 		t.Run(network, func(t *testing.T) {
 			for _, query := range []struct {
@@ -35,8 +73,8 @@ func TestDNS(t *testing.T) {
 				kind uint16
 				want string
 			}{
-				{name: hostname + ".", kind: dns.TypeA, want: "192.168.77.100"},
-				{name: "100.77.168.192.in-addr.arpa.", kind: dns.TypePTR, want: hostname + "."},
+				{name: hostname + ".", kind: dns.TypeA, want: address},
+				{name: reverse, kind: dns.TypePTR, want: hostname + "."},
 			} {
 				client := dns.Client{Net: network, Timeout: 3 * time.Second}
 				reply, _, err := client.ExchangeContext(t.Context(), new(dns.Msg).SetQuestion(query.name, query.kind), "192.168.77.1:53")
@@ -62,7 +100,7 @@ func TestDNS(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	addresses, err := net.DefaultResolver.LookupHost(ctx, "client1")
-	if err != nil || len(addresses) != 1 || addresses[0] != "192.168.77.100" {
+	if err != nil || len(addresses) != 1 || addresses[0] != address {
 		t.Fatalf("DHCP-configured system resolver/search domain: %v, %v", addresses, err)
 	}
 }

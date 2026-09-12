@@ -45,7 +45,7 @@ jobs:
         run: go test -race -count=1 -shuffle=on -timeout=5m -tags=integration ./...
 
   e2e-qemu:
-    name: QEMU end-to-end
+    name: QEMU BIOS and UEFI end-to-end
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -64,12 +64,12 @@ jobs:
       - name: Install VM test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y qemu-system-x86 iproute2 tcpdump dnsutils cpio
+          sudo apt-get install --no-install-recommends -y qemu-system-x86 ovmf ipxe-qemu iproute2 tcpdump dnsutils cpio curl
 
-      - name: Boot Linux and test all services on isolated TAP
+      - name: Network boot BIOS and UEFI and test all services on isolated TAP
         run: make e2e-qemu
 
-      - name: Save guest console, server log, and packet capture
+      - name: Save guest console, server log, packet capture, and boot proof
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

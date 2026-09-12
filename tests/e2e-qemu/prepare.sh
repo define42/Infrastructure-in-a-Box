@@ -2,6 +2,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
+python3 -B -m unittest discover -s tests/e2e-qemu -p 'test_*.py'
+
 # Preparation runs as the caller. Only run.py needs network administration.
 assets="$PWD/.cache/e2e-qemu"
 mkdir -p "$assets"

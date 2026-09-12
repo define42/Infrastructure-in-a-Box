@@ -13,7 +13,7 @@ integration:
 
 e2e-qemu:
 	bash tests/e2e-qemu/prepare.sh
-	sudo -- python3 tests/e2e-qemu/run.py
+	sudo -- python3 -B tests/e2e-qemu/run.py
 
 vet:
 	go vet ./...

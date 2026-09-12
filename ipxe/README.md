@@ -14,7 +14,7 @@ make build
 
 The bootstrap obtains DHCP settings and loads the main script from
 `http://${next-server}/boot/boot.ipxe`. Keep that main script and operating system
-images in the configured `tftp_root` directory, which is served over HTTP/HTTPS.
+images in the configured `boot_root` directory, which is served over HTTP/HTTPS.
 
 The upstream license notices are included as `COPYING*`. Only `pxelinux.0` and
 `bootx64.efi` are embedded and available over TFTP; metadata and source files

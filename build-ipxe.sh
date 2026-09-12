@@ -87,4 +87,4 @@ install -m 0644 -- "$build_dir"/COPYING* "$output_dir/"
 
 printf '\nBuilt iPXE loaders in %s\n' "$output_dir"
 printf 'Run make build and restart the application to use these built-in TFTP loaders.\n'
-printf 'Place your main boot.ipxe script in tftp_root for HTTP access at /boot/boot.ipxe.\n'
+printf 'Place your main boot.ipxe script in boot_root for HTTP access at /boot/boot.ipxe.\n'

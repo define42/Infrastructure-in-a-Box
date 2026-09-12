@@ -34,8 +34,8 @@ type Config struct {
 	Upstream      string
 	DNSTTL        time.Duration
 	TFTPAddress   string
-	// TFTPDirectory retains the tftp_root setting for public HTTP and HTTPS /boot/ assets.
-	TFTPDirectory string
+	// BootDirectory contains public files served over HTTP and HTTPS at /boot/.
+	BootDirectory string
 	HTTPAddress   string
 	HTTPSAddress  string
 	CADirectory   string
@@ -103,8 +103,8 @@ func (settings fileSettings) config() (Config, error) {
 		return Config{}, err
 	}
 	cfg.TFTPAddress = net.JoinHostPort(cfg.ServerIP.String(), "69")
-	if strings.TrimSpace(cfg.TFTPDirectory) == "" {
-		return Config{}, errors.New("tftp_root must name a directory")
+	if strings.TrimSpace(cfg.BootDirectory) == "" {
+		return Config{}, errors.New("boot_root must name a directory")
 	}
 	cfg.DNSAddress = net.JoinHostPort(cfg.ServerIP.String(), "53")
 	cfg.HTTPAddress = net.JoinHostPort(cfg.ServerIP.String(), "80")

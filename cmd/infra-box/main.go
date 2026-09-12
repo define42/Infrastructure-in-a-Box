@@ -133,7 +133,7 @@ func newGateway(cfg config.Config, ca *pki.Manager, leases *lease.Manager, logge
 	}
 	web, err := gateway.New(gateway.Config{
 		Address: cfg.HTTPSAddress, HTTPAddress: cfg.HTTPAddress, Domain: cfg.Domain,
-		ACMEHandler: acme, BootDirectory: cfg.TFTPDirectory,
+		ACMEHandler: acme, BootDirectory: cfg.BootDirectory,
 	}, ca.RootPEM(), ca.GetCertificate, logger)
 	if err != nil {
 		return nil, fmt.Errorf("initialize web gateway: %w", err)

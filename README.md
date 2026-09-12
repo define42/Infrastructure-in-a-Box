@@ -178,7 +178,7 @@ The maximum file size is 1 MiB.
 | `lease_duration` | `12h` | Lease lifetime, in whole seconds, at least `1m`. |
 | `lease_file` | `leases.json` | Persisted lease state; set to `""` for memory only. |
 | `dhcp_listen` | `:67` | DHCP UDP listener; must not conflict with DNS or TFTP. |
-| `tftp_root` | `tftp` | Directory of public HTTP/HTTPS `/boot/` files, created if absent; TFTP serves only built-in loaders. Cannot be empty, contain the configuration or private state, or reside inside `ca_dir`. |
+| `boot_root` | `tftp` | Directory of public HTTP/HTTPS `/boot/` files, created if absent; TFTP serves only built-in loaders. Cannot be empty, contain the configuration or private state, or reside inside `ca_dir`. |
 | `upstream` | `""` | Optional numeric IPv4 address and port for external DNS, such as `1.1.1.1:53`; empty disables forwarding. |
 | `dns_ttl` | `1m` | Maximum TTL for DNS records, in whole seconds, at least `1s`. |
 | `a_records` | `{}` | Exact or wildcard DNS names mapped to IPv4 address strings, including external-name overrides. |
@@ -195,6 +195,10 @@ Absolute paths remain unchanged. For example, a file at
 `/etc/infra-box/pki/acme.json`. An explicit relative `acme_state` is relative to
 the configuration file, not to `ca_dir`. Paths do not expand `~` or environment
 variables.
+
+For existing configurations, rename `tftp_root` to `boot_root` and keep its
+directory value unchanged. The old key is no longer accepted; boot files do not
+need to move.
 
 To migrate an existing launch command, move each service flag into the JSON
 object, remove its leading hyphen, and replace hyphens in its name with
@@ -390,8 +394,7 @@ BOOTP file field, and DHCP options 66 and 67. Ordinary DHCP clients continue to
 receive leases without boot instructions.
 
 Place `boot.ipxe`, kernels, initramfs files, and operating-system images in
-`tftp_root`. This setting retains its name but now controls only the public HTTP
-and HTTPS `/boot/` directory. For example:
+`boot_root`, the public HTTP and HTTPS `/boot/` directory. For example:
 
 ```text
 /var/lib/infra-box/tftp/
@@ -420,7 +423,7 @@ the Slax initramfs to access its ISO without HTTPS or private CA support.
 HTTPS clients must trust the private root CA. Web file updates take effect
 without a restart.
 
-Relative `tftp_root` paths resolve beside the JSON configuration file; the
+Relative `boot_root` paths resolve beside the JSON configuration file; the
 default is a sibling directory named `tftp`. The example configuration uses
 `/var/lib/infra-box/tftp`. The gateway creates an absent directory at startup.
 An unusable directory or occupied listener stops the application along with
@@ -447,7 +450,7 @@ options are absent. Unknown options are omitted. Only the two built-in loader
 filenames can be downloaded; other filenames, paths, and uploads are rejected.
 TFTP has no directory listing or client authentication. The HTTP and HTTPS
 `/boot/` directory is also public; keep only public boot assets there. Web
-downloads reject traversal and symlink escapes outside `tftp_root`.
+downloads reject traversal and symlink escapes outside `boot_root`.
 
 Permit UDP port 69 and replies from the server's ephemeral transfer ports, plus
 TCP ports 80 and 443 for web downloads, in any firewall between the client and
@@ -769,7 +772,7 @@ latest Go 1.26 patch release and read-only repository permissions.
 On an x86-64 Linux host, install the prerequisites and run:
 
 ```sh
-sudo apt-get install qemu-system-x86 iproute2 tcpdump dnsutils cpio curl
+sudo apt-get install qemu-system-x86 ovmf ipxe-qemu iproute2 tcpdump dnsutils cpio curl
 make e2e-qemu
 ```
 
@@ -780,13 +783,23 @@ with the race detector, and builds a static Go test probe for the guest. The
 guest uses Alpine's kernel, BusyBox DHCP client, and virtio drivers, with a small
 test-specific init script. No packages are installed or downloaded in the guest.
 
-The harness starts the complete server and a QEMU Linux guest in a fresh network
-namespace containing only loopback and `tap0`. The server uses
+The harness runs BIOS and x86-64 UEFI network boots in sequence. Each starts the
+complete server and a QEMU guest in a fresh network namespace containing only
+loopback and `tap0`. The server uses
 `192.168.77.1/24`; the guest obtains its address from DHCP. There is no physical
 interface, host bridge, uplink, default gateway, or DNS forwarder. QEMU uses
-software emulation so the same test works on GitHub runners without KVM.
+software emulation so the same test works on GitHub runners without KVM. UEFI
+uses OVMF with fresh variables and Secure Boot disabled. Firmware and Linux can
+use different DHCP client IDs; the checks follow Linux's assigned lease address.
 
-The guest verifies DHCP address, subnet, DNS and search-domain options; forward
+The BIOS guest downloads the application's embedded `pxelinux.0` over TFTP, and
+the UEFI guest downloads its embedded `bootx64.efi`. Both execute iPXE, which uses
+the DHCP `next-server` address to fetch `/boot/boot.ipxe`, then downloads the
+Alpine kernel and test initramfs over HTTP. The harness compares the captured
+TFTP payload against the embedded loader and verifies the HTTP downloads. A
+unique value passed by `boot.ipxe` to the guest proves that the script ran.
+
+Each guest verifies DHCP address, subnet, DNS and search-domain options; forward
 and reverse DNS over UDP and TCP; short-name resolution; HTTPS with the generated
 CA; ACME certificate issuance with a real port-80 HTTP-01 callback; and LDAP/LDAPS
 authentication and searches, including rejection of an incorrect password.
@@ -800,9 +813,13 @@ lease expiration remove forward and reverse DNS records. A one-minute lease
 keeps this test reasonably short. Serial-console checkpoints and bounded waits
 make failures observable even when guest networking is broken.
 
-Each run writes `guest.log`, `server.log`, `tcpdump.log`, and `network.pcap` under
-`artifacts/e2e-qemu/<run-id>/`. Temporary guest files, server state, processes, and
-the network namespace are removed on exit, including ordinary failures and
+Each run writes `guest.log`, `server.log`, `tcpdump.log`, and `network.pcap` in
+separate `bios/` and `uefi/` directories under `artifacts/e2e-qemu/<run-id>/`.
+Successful cases also write `boot-proof.json` with the loader and HTTP request
+verification. On failure, the harness saves `guest-screen.ppm` when QEMU is
+still running, so firmware errors are visible even before the serial console
+starts. Temporary guest files, server state, processes, and
+the network namespaces are removed on exit, including ordinary failures and
 interrupts. Private CA keys are not retained in the artifacts. GitHub Actions
 runs `make e2e-qemu` in its own job on every push, pull request, and manual run,
 and uploads the diagnostics for seven days even when the test fails. This suite

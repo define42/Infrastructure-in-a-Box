@@ -122,7 +122,7 @@ func TestLoadDefaults(t *testing.T) {
 		HTTPAddress:   "192.168.50.2:80",
 		HTTPSAddress:  "192.168.50.2:443",
 		TFTPAddress:   "192.168.50.2:69",
-		TFTPDirectory: filepath.Join(dir, "tftp"),
+		BootDirectory: filepath.Join(dir, "tftp"),
 		CADirectory:   filepath.Join(dir, "pki"),
 		ACMEStateFile: filepath.Join(dir, "pki", "acme.json"),
 		LDAP: config.LDAPConfig{
@@ -837,7 +837,7 @@ func configKeys() []string {
 	return []string{
 		"interface", "server_ip", "subnet", "pool_start", "pool_end", "router",
 		"domain", "lease_duration", "lease_file", "dhcp_listen",
-		"upstream", "dns_ttl", "ca_dir", "acme_state", "tftp_root",
+		"upstream", "dns_ttl", "ca_dir", "acme_state", "boot_root",
 	}
 }
 
