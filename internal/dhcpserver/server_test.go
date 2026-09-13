@@ -358,7 +358,7 @@ func TestHandleFallbackHostnameLongClientIdentifiers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			file := filepath.Join(t.TempDir(), "leases.json")
-			s, manager := testServer(t, file)
+			s, _ := testServer(t, file)
 			id := bytes.Repeat([]byte{1}, tc.length)
 			acquire := func() *dhcpv4.DHCPv4 {
 				t.Helper()
@@ -391,7 +391,7 @@ func TestHandleFallbackHostnameLongClientIdentifiers(t *testing.T) {
 			if second.HostName() == first.HostName() || second.HostName() == "" || second.YourIPAddr.Equal(first.YourIPAddr) {
 				t.Fatalf("distinct identifiers share an address or hostname: %v, %v", first, second)
 			}
-			s, manager = testServer(t, file)
+			s, manager := testServer(t, file)
 			for i, ack := range []*dhcpv4.DHCPv4{first, second} {
 				id[len(id)-1] = byte(i + 1)
 				stored, ok := manager.LookupName(ack.HostName())
