@@ -6,9 +6,10 @@ usage() {
 Usage: ./build-ipxe.sh [--help]
 
 Download iPXE and build BIOS and x64 UEFI loaders with our DHCP-based bootstrap.
+Both loaders support graphical menus with PNG backgrounds (JPEG is unsupported).
 Outputs are saved to ipxe/ beside this script for embedding in the application:
   pxelinux.0         BIOS iPXE loader (undionly.kpxe)
-  bootx64.efi        x64 UEFI iPXE loader (unsigned)
+  bootx64.efi        x64 UEFI iPXE loader (ipxe-legacy.efi, unsigned)
   bootstrap.ipxe    Embedded startup script
   ipxe-revision.txt  Source commit used for this build
   COPYING*          Upstream license notices
@@ -74,14 +75,26 @@ dhcp
 chain http://${next-server}/boot/boot.ipxe
 EOF
 
+# Enable PNG backgrounds and console/colour/cpair commands on both platforms.
+# Upstream BIOS defaults disable the graphical console and its commands.
+cat > "$build_dir/src/config/local/general.h" <<'EOF'
+#define CONSOLE_CMD
+#define IMAGE_PNG
+EOF
+cat > "$build_dir/src/config/local/console.h" <<'EOF'
+#define CONSOLE_FRAMEBUFFER
+EOF
+
+# Leave USB controllers with UEFI so firmware keyboard input survives in menus
+# and chained EFI applications (https://github.com/ipxe/ipxe/issues/1643).
 # An inherited DEBUG value is interpreted by iPXE as a list of source filenames.
 make -C "$build_dir/src" -j "$build_jobs" \
-    bin/undionly.kpxe bin-x86_64-efi/ipxe.efi EMBED=bootstrap.ipxe DEBUG=
+    bin/undionly.kpxe bin-x86_64-efi/ipxe-legacy.efi EMBED=bootstrap.ipxe DEBUG=
 test -s "$build_dir/src/bin/undionly.kpxe"
-test -s "$build_dir/src/bin-x86_64-efi/ipxe.efi"
+test -s "$build_dir/src/bin-x86_64-efi/ipxe-legacy.efi"
 
 install -m 0644 -- "$build_dir/src/bin/undionly.kpxe" "$output_dir/pxelinux.0"
-install -m 0644 -- "$build_dir/src/bin-x86_64-efi/ipxe.efi" "$output_dir/bootx64.efi"
+install -m 0644 -- "$build_dir/src/bin-x86_64-efi/ipxe-legacy.efi" "$output_dir/bootx64.efi"
 install -m 0644 -- "$build_dir/src/bootstrap.ipxe" "$build_dir/ipxe-revision.txt" "$output_dir/"
 install -m 0644 -- "$build_dir"/COPYING* "$output_dir/"
 
