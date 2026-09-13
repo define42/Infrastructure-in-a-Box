@@ -18,6 +18,7 @@ import (
 // An invalid Router means no default gateway is advertised; an empty LeaseFile
 // disables persistence and an empty Upstream disables external DNS forwarding.
 // Loaded persistence paths are absolute; relative JSON values resolve beside the file.
+// DHCPAddress uses UDP port 67 on Interface, including broadcast traffic.
 // DNSAddress, HTTPAddress, HTTPSAddress, TFTPAddress and NTPAddress use ServerIP
 // and fixed service ports.
 type Config struct {
@@ -106,6 +107,9 @@ func (settings fileSettings) config() (Config, error) {
 	if err := validateDuration("dns_ttl", cfg.DNSTTL, time.Second); err != nil {
 		return Config{}, err
 	}
+	// DHCP discovery is broadcast, so the socket must bind the interface rather
+	// than ServerIP. ServerIP remains the advertised DHCP server identifier.
+	cfg.DHCPAddress = ":67"
 	cfg.TFTPAddress = net.JoinHostPort(cfg.ServerIP.String(), "69")
 	cfg.NTPAddress = net.JoinHostPort(cfg.ServerIP.String(), "123")
 	cfg.NFSAddress = net.JoinHostPort(cfg.ServerIP.String(), "2049")
@@ -241,26 +245,10 @@ func validateDuration(name string, value, minimum time.Duration) error {
 }
 
 func (c Config) validateListeners() error {
-	dhcp, err := parseAddress("dhcp_listen", c.DHCPAddress, true)
-	if err != nil {
-		return err
-	}
-	if !dhcp.Addr().IsUnspecified() && dhcp.Addr() != c.ServerIP {
-		return errors.New("dhcp_listen must bind to all ipv4 addresses or server_ip")
-	}
-	if dhcp.Port() == 69 {
-		return errors.New("dhcp_listen conflicts with TFTP on UDP port 69")
-	}
-	if dhcp.Port() == 53 {
-		return errors.New("dhcp_listen conflicts with DNS on UDP port 53")
-	}
-	if dhcp.Port() == 123 {
-		return errors.New("dhcp_listen conflicts with NTP on UDP port 123")
-	}
 	if c.Upstream == "" {
 		return nil
 	}
-	upstream, err := parseAddress("upstream", c.Upstream, false)
+	upstream, err := parseAddress("upstream", c.Upstream)
 	if err != nil {
 		return err
 	}
@@ -273,13 +261,10 @@ func (c Config) validateListeners() error {
 	return nil
 }
 
-func parseAddress(name, value string, allowWildcard bool) (netip.AddrPort, error) {
+func parseAddress(name, value string) (netip.AddrPort, error) {
 	host, portText, err := net.SplitHostPort(value)
 	if err != nil {
 		return netip.AddrPort{}, fmt.Errorf("%s must be numeric ipv4:port: %q", name, value)
-	}
-	if host == "" && allowWildcard {
-		host = "0.0.0.0"
 	}
 	addr, err := netip.ParseAddr(host)
 	if err != nil || !addr.Is4() {

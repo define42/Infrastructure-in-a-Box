@@ -291,16 +291,13 @@ func TestLoadRejectsLDAPRuntimeSettings(t *testing.T) {
 	}
 }
 
-func TestLoadLDAPListenerAndDNSReservations(t *testing.T) {
+func TestLoadLDAPDNSReservations(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name    string
-		setting string
 		records string
 		want    string
 	}{
-		{name: "UDP LDAP port allowed", setting: `"dhcp_listen":":389"`},
-		{name: "UDP LDAPS port allowed", setting: `"dhcp_listen":":636"`},
 		{name: "existing identical record", records: `{"LDAP":"192.168.50.2"}`},
 		{name: "conflicting record", records: `{"ldap":"192.168.50.3"}`, want: "ldap hostname must point to server_ip"},
 		{name: "wildcard coexistence", records: `{"*":"192.168.50.3"}`},
@@ -308,9 +305,6 @@ func TestLoadLDAPListenerAndDNSReservations(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			data := withLDAP(t, `{}`)
-			if tc.setting != "" {
-				data = strings.TrimSuffix(data, "}") + `,` + tc.setting + "}"
-			}
 			if tc.records != "" {
 				data = strings.TrimSuffix(data, "}") + `,"a_records":` + tc.records + "}"
 			}

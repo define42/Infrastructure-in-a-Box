@@ -57,6 +57,7 @@ func TestParseRejectsArguments(t *testing.T) {
 		{name: "positional", args: []string{"serve"}, want: "positional argument"},
 		{name: "config as positional", args: []string{"other.json"}, want: "positional argument"},
 		{name: "unknown flag", args: []string{"-unknown"}, want: "flag provided but not defined"},
+		{name: "removed DHCP listener flag", args: []string{"-dhcp-listen", ":1067"}, want: "flag provided but not defined"},
 		{name: "removed DNS listener flag", args: []string{"-dns-listen", ":1053"}, want: "flag provided but not defined"},
 		{name: "missing path", args: []string{"-config"}, want: "flag needs an argument"},
 	}
@@ -145,7 +146,6 @@ func TestLoadOverrides(t *testing.T) {
 		"lease_duration", "2h",
 		"lease_file", "",
 		"dns_ttl", "10s",
-		"dhcp_listen", "192.168.50.2:1067",
 		"upstream", "127.0.0.1:53",
 		"ca_dir", "/var/lib/infra-box/pki",
 	)
@@ -159,7 +159,7 @@ func TestLoadOverrides(t *testing.T) {
 	if cfg.LeaseFile != "" || cfg.LeaseDuration != 2*time.Hour || cfg.DNSTTL != 10*time.Second {
 		t.Errorf("incorrect lease/ttl settings: %+v", cfg)
 	}
-	if cfg.DNSAddress != "192.168.50.2:53" || cfg.DHCPAddress != "192.168.50.2:1067" || cfg.Upstream != "127.0.0.1:53" {
+	if cfg.DNSAddress != "192.168.50.2:53" || cfg.DHCPAddress != ":67" || cfg.Upstream != "127.0.0.1:53" {
 		t.Errorf("incorrect listener settings: %+v", cfg)
 	}
 	if cfg.HTTPSAddress != "192.168.50.2:443" || cfg.CADirectory != "/var/lib/infra-box/pki" {
@@ -182,6 +182,9 @@ func TestLoadListenerAddressesFollowServerIP(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if cfg.DHCPAddress != ":67" {
+				t.Errorf("DHCPAddress = %q, want :67 for broadcast reception", cfg.DHCPAddress)
+			}
 			if want := tc.serverIP + ":53"; cfg.DNSAddress != want {
 				t.Errorf("DNSAddress = %q, want %q", cfg.DNSAddress, want)
 			}
@@ -190,6 +193,32 @@ func TestLoadListenerAddressesFollowServerIP(t *testing.T) {
 			}
 			if want := tc.serverIP + ":443"; cfg.HTTPSAddress != want {
 				t.Errorf("HTTPSAddress = %q, want %q", cfg.HTTPSAddress, want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsDHCPListen(t *testing.T) {
+	t.Parallel()
+	base, err := json.Marshal(validValues())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, raw string }{
+		{name: "empty", raw: `""`},
+		{name: "old default", raw: `":67"`},
+		{name: "server address", raw: `"192.168.50.2:67"`},
+		{name: "wildcard", raw: `"0.0.0.0:67"`},
+		{name: "custom port", raw: `"192.168.50.2:1067"`},
+		{name: "null", raw: `null`},
+		{name: "number", raw: `67`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			data := strings.TrimSuffix(string(base), "}") + `,"dhcp_listen":` + tc.raw + "}"
+			_, err := config.Load(writeRawConfig(t, data))
+			if err == nil || !strings.Contains(err.Error(), `unknown configuration key "dhcp_listen"`) {
+				t.Fatalf("Load() error = %v, want unknown dhcp_listen key", err)
 			}
 		})
 	}
@@ -560,21 +589,6 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 			want:   "cannot exceed",
 		},
 		{
-			name:   "empty dhcp listener",
-			values: []string{"dhcp_listen", ""},
-			want:   "dhcp_listen",
-		},
-		{
-			name:   "dhcp listener wrong interface",
-			values: []string{"dhcp_listen", "192.168.51.2:67"},
-			want:   "dhcp_listen must bind",
-		},
-		{
-			name:   "same udp listener",
-			values: []string{"dhcp_listen", ":53"},
-			want:   "dhcp_listen conflicts with DNS on UDP port 53",
-		},
-		{
 			name:   "empty CA directory",
 			values: []string{"ca_dir", ""},
 			want:   "persistent directory",
@@ -666,14 +680,6 @@ func TestLoadBoundaryValues(t *testing.T) {
 		{
 			name:   "long valid domain",
 			values: []string{"domain", strings.Repeat("abcd.", 48) + "ab"},
-		},
-		{
-			name:   "wildcard DHCP listener",
-			values: []string{"dhcp_listen", "0.0.0.0:67"},
-		},
-		{
-			name:   "dhcp and https use separate transports",
-			values: []string{"dhcp_listen", ":443"},
 		},
 		{
 			name:   "upstream same server different port",
@@ -838,7 +844,7 @@ func TestLoadRejectsConfigOverwrite(t *testing.T) {
 func configKeys() []string {
 	return []string{
 		"interface", "server_ip", "subnet", "pool_start", "pool_end", "router",
-		"domain", "lease_duration", "lease_file", "dhcp_listen",
+		"domain", "lease_duration", "lease_file",
 		"upstream", "dns_ttl", "ca_dir", "acme_state", "boot_root",
 	}
 }

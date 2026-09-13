@@ -52,15 +52,23 @@ func New(config Config, leases *lease.Manager, logger *slog.Logger) (*Server, er
 
 // Run binds an interface-specific, broadcast-capable socket until cancellation.
 func (s *Server) Run(ctx context.Context) error {
+	conn, err := s.listen()
+	if err != nil {
+		return err
+	}
+	return s.Serve(ctx, conn)
+}
+
+func (s *Server) listen() (*net.UDPConn, error) {
 	addr, err := net.ResolveUDPAddr("udp4", s.config.Address)
 	if err != nil {
-		return fmt.Errorf("resolve DHCP listener: %w", err)
+		return nil, fmt.Errorf("resolve DHCP listener: %w", err)
 	}
 	conn, err := server4.NewIPv4UDPConn(s.config.Interface, addr)
 	if err != nil {
-		return fmt.Errorf("listen for DHCP: %w", err)
+		return nil, fmt.Errorf("listen for DHCP: %w", err)
 	}
-	return s.Serve(ctx, conn)
+	return conn, nil
 }
 
 // Serve takes ownership of conn. Requests are processed serially to bound work

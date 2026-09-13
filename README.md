@@ -190,7 +190,6 @@ The maximum file size is 1 MiB.
 | `domain` | `home.arpa` | Domain for DHCP hostnames. |
 | `lease_duration` | `12h` | Lease lifetime, in whole seconds, at least `1m`. |
 | `lease_file` | `leases.json` | Persisted lease state; set to `""` for memory only. |
-| `dhcp_listen` | `:67` | DHCP UDP listener; must not conflict with DNS, NTP, or TFTP. |
 | `boot_root` | `tftp` | Directory of public HTTP/HTTPS `/boot/` files, created if absent; TFTP serves only built-in loaders. Cannot be empty, contain the configuration or private state, or reside inside `ca_dir`. |
 | `upstream` | `""` | Optional numeric IPv4 address and port for external DNS, such as `1.1.1.1:53`; empty disables forwarding. |
 | `dns_ttl` | `1m` | Maximum TTL for DNS records, in whole seconds, at least `1s`. |
@@ -222,12 +221,13 @@ with `-config /path/to/config.json`. Keep existing state paths absolute, or
 adjust relative paths for the configuration file's location, so the server
 continues using the same leases, CA, and ACME state.
 
+DHCP always listens on UDP port 67, bound to the configured `interface` so it
+can receive broadcast discovery requests. It advertises `server_ip` as the DHCP
+server identifier; binding the socket to that IP alone would block discovery.
 DNS always listens on `<server_ip>:53` for UDP and TCP. The gateway always listens
 on `<server_ip>:80` for HTTP and `<server_ip>:443` for HTTPS. Ensure both TCP ports
-are available when upgrading. Remove `dns_listen` and `https_listen` from older
-configuration files; those keys are no longer accepted. The DHCP listener
-accepts `:port`, `0.0.0.0:port`, or `<server_ip>:port`. Alternate DHCP ports
-support development, but normal DHCP clients expect port 67. Hostname-based upstream
+are available when upgrading. Remove `dhcp_listen`, `dns_listen`, and `https_listen`
+from older configuration files; those keys are no longer accepted. Hostname-based upstream
 addresses are rejected to avoid depending on DNS during startup. An upstream
 must not point back to the DNS listener.
 

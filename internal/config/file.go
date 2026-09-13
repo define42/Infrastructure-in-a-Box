@@ -51,7 +51,7 @@ func Load(path string) (Config, error) {
 	}
 	settings := fileSettings{
 		cfg: Config{
-			DHCPAddress: ":67", Domain: "home.arpa", LeaseFile: "leases.json", CADirectory: "pki", BootDirectory: "tftp",
+			Domain: "home.arpa", LeaseFile: "leases.json", CADirectory: "pki", BootDirectory: "tftp",
 		},
 		leaseDuration: "12h", dnsTTL: "1m",
 	}
@@ -120,7 +120,6 @@ func (settings *fileSettings) decode(data []byte) error {
 		"domain":         &settings.cfg.Domain,
 		"lease_duration": &settings.leaseDuration,
 		"lease_file":     &settings.cfg.LeaseFile,
-		"dhcp_listen":    &settings.cfg.DHCPAddress,
 		"upstream":       &settings.cfg.Upstream,
 		"dns_ttl":        &settings.dnsTTL,
 		"ca_dir":         &settings.cfg.CADirectory,
